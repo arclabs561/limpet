@@ -731,11 +731,11 @@ func (l leveledLogger) Warn(msg string, keysAndValues ...any) {
 }
 
 func (l leveledLogger) Info(msg string, keysAndValues ...any) {
-	l.fields(keysAndValues).Trace().Msg(msg)
+	l.fields(keysAndValues).Info().Msg(msg)
 }
 
 func (l leveledLogger) Debug(msg string, keysAndValues ...any) {
-	l.fields(keysAndValues).Trace().Msg(msg)
+	l.fields(keysAndValues).Debug().Msg(msg)
 }
 
 const LatestPageVersion = 1

@@ -83,7 +83,6 @@ func setupLogger(
 	cmd *cobra.Command,
 	args []string,
 ) context.Context {
-	fmt.Println("setupLogger")
 	logLevel, err := zerolog.ParseLevel(mustFlagString(cmd, "log-level"))
 	if err != nil {
 		log.Fatal().Err(err).Send()
@@ -234,23 +233,7 @@ func mustFlagBool(cmd *cobra.Command, name string) bool {
 	return val
 }
 
-// const defaultSubCmd = "do"
-
 func Execute() {
-	// var cmdFound bool
-	// cmd := rootCmd.Commands()
-	// for _, a := range cmd {
-	// 	for _, b := range os.Args[1:] {
-	// 		if a.Name() == b {
-	// 			cmdFound = true
-	// 			break
-	// 		}
-	// 	}
-	// }
-	// if !cmdFound {
-	// 	args := append([]string{defaultSubCmd}, os.Args[1:]...)
-	// 	rootCmd.SetArgs(args)
-	// }
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

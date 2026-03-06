@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/k0kubun/pp"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"inet.af/tcpproxy"
@@ -81,12 +80,6 @@ func (s *scraperTarget) HandleConn(downstream net.Conn) {
 	}
 	log.Debug().Str("host", req.URL.Host).Str("path", req.URL.Path).Msg("processing request")
 
-	// // Adjusting the request for client forwarding.
-	// req.RequestURI = ""
-	// req.Host = req.URL.Host
-
-	pp.Println(req)
-
 	start := time.Now()
 	page, err := s.sc.Do(s.ctx, req)
 	if err != nil {
@@ -128,85 +121,17 @@ func (s *scraperTarget) HandleConn(downstream net.Conn) {
 	}
 }
 
-// // helloTimeout = flag.Duration("hello-timeout", 3*time.Second, "how long to wait for the TLS ClientHello")
-// const helloTimeout = 3 * time.Second
-
-// func (s *scraperTarget) HandleConn2(src net.Conn) {
-// 	defer src.Close()
-
-// 	if err := src.SetReadDeadline(time.Now().Add(helloTimeout)); err != nil {
-// 		log.Error().Err(err).Msg("failed to set read deadline for ClientHello")
-// 		return
-// 	}
-
-// 	var (
-// 		err          error
-// 		handshakeBuf bytes.Buffer
-// 	)
-// 	hostname, tlsMinor, err := extractSNI(io.TeeReader(src, &handshakeBuf))
-// 	if err != nil {
-// 		log.Error().Err(err).Msg("failed to extract SNI")
-// 		return
-// 	}
-
-// 	log.Debug().Str("hostname", hostname).Msg("extracted SNI")
-
-// 	if err = src.SetReadDeadline(time.Time{}); err != nil {
-// 		log.Error().Err(err).Msg("failed to clear read deadline for ClientHello")
-// 		return
-// 	}
-
-// 	addProxyHeader := false
-// 	c.backend, addProxyHeader = c.config.Match(c.hostname)
-// 	if c.backend == "" {
-// 		c.sniFailed("no backend found for %q", c.hostname)
-// 		return
-// 	}
-
-// 	c.logf("routing %q to %q", c.hostname, c.backend)
-// 	backend, err := net.DialTimeout("tcp", c.backend, 10*time.Second)
-// 	if err != nil {
-// 		c.internalError("failed to dial backend %q for %q: %s", c.backend, c.hostname, err)
-// 		return
-// 	}
-// 	defer backend.Close()
-
-// 	c.backendConn = backend.(*net.TCPConn)
-
-// 	// If the backend supports the HAProxy PROXY protocol, give it the
-// 	// real source information about the connection.
-// 	if addProxyHeader {
-// 		remote := c.TCPConn.RemoteAddr().(*net.TCPAddr)
-// 		local := c.TCPConn.LocalAddr().(*net.TCPAddr)
-// 		family := "TCP6"
-// 		if remote.IP.To4() != nil {
-// 			family = "TCP4"
-// 		}
-// 		if _, err := fmt.Fprintf(c.backendConn, "PROXY %s %s %s %d %d\r\n", family, remote.IP, local.IP, remote.Port, local.Port); err != nil {
-// 			c.internalError("failed to send PROXY header to %q: %s", c.backend, err)
-// 			return
-// 		}
-// 	}
-
-// 	// Replay the piece of the handshake we had to read to do the
-// 	// routing, then blindly proxy any other bytes.
-// 	if _, err = io.Copy(c.backendConn, &handshakeBuf); err != nil {
-// 		c.internalError("failed to replay handshake to %q: %s", c.backend, err)
-// 		return
-// 	}
-
-// 	var wg sync.WaitGroup
-// 	wg.Add(2)
-// 	go proxy(&wg, c.TCPConn, c.backendConn)
-// 	go proxy(&wg, c.backendConn, c.TCPConn)
-// 	wg.Wait()
-// }
-
 func proxy(wg *sync.WaitGroup, a, b net.Conn) {
 	defer wg.Done()
 	atcp, btcp := a.(*net.TCPConn), b.(*net.TCPConn)
 	if _, err := io.Copy(atcp, btcp); err != nil {
-		log.Printf("%s<>%s -> %s<>%s: %s", atcp.RemoteAddr(), atcp.LocalAddr(), btcp.LocalAddr(), btcp.RemoteAddr(), err)
+		log.Error().
+			Str("src_remote", atcp.RemoteAddr().String()).
+			Str("src_local", atcp.LocalAddr().String()).
+			Str("dst_local", btcp.LocalAddr().String()).
+			Str("dst_remote", btcp.RemoteAddr().String()).
+			Err(err).
+			Msg("proxy copy error")
 	}
 	btcp.CloseWrite()
 	atcp.CloseRead()

@@ -231,7 +231,7 @@ func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte, opts ...
 		if n < len(data) {
 			_ = zw.Close()
 			_ = w.Close()
-			return fmt.Errorf(fmt.Sprintf("violation of io.Writer interface: %d < %d", n, len(data)))
+			return fmt.Errorf("violation of io.Writer interface: %d < %d", n, len(data))
 		}
 		if err := zw.Close(); err != nil {
 			return fmt.Errorf("failed to close zstd writer: %w", err)

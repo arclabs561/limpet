@@ -9,11 +9,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-go@v4
+    - uses: actions/checkout@v4
+    - uses: actions/setup-go@v5
       with:
-        go-version: "1.21"
-    - uses: actions/setup-node@v3
+        go-version: "1.25"
+    - uses: actions/setup-node@v4
       with:
         node-version: "18.17"
     # Always save cache for apt/lists, as the playwright install --with-deps
@@ -21,12 +21,12 @@ jobs:
     # matter the success of subsequent step success.
     #
     # https://github.com/actions/cache/tree/main/save#always-save-cache
-    - uses: actions/cache@v3
+    - uses: actions/cache@v4
       if: always()
       with:
         path: /var/lib/apt/lists
         key: ${{ runner.os }}-apt
-    - uses: actions/cache@v3
+    - uses: actions/cache@v4
       with:
         path: |
           /home/runner/.cache/ms-playwright-go
@@ -42,20 +42,20 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - uses: codecov/codecov-action@v3
   security:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - uses: trufflesecurity/trufflehog@v3.48.0
   golangci-lint:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-go@v4
+    - uses: actions/checkout@v4
+    - uses: actions/setup-go@v5
       with:
-        go-version: "1.21"
+        go-version: "1.25"
     - uses: golangci/golangci-lint-action@v3
       with:
         version: latest
@@ -63,11 +63,11 @@ jobs:
   just-lint:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-go@v4
+    - uses: actions/checkout@v4
+    - uses: actions/setup-go@v5
       with:
-        go-version: "1.21"
-    - uses: actions/setup-python@v4
+        go-version: "1.25"
+    - uses: actions/setup-python@v5
       with:
         python-version: "3.11"
     - run: go install github.com/google/yamlfmt/cmd/yamlfmt@v0.9.0
