@@ -819,6 +819,15 @@ func (p *Page) Stale() bool {
 	return false
 }
 
+// StaleAfter reports whether this cached page was fetched more than maxAge ago.
+// Use this for scraping targets that send no HTTP cache headers.
+func (p *Page) StaleAfter(maxAge time.Duration) bool {
+	if p.Meta.FetchedAt.IsZero() {
+		return true
+	}
+	return time.Since(p.Meta.FetchedAt) > maxAge
+}
+
 // HTTPResponse reconstructs a standard *http.Response from the cached page.
 func (p *Page) HTTPResponse() *http.Response {
 	return &http.Response{

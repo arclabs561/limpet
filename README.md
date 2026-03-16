@@ -9,10 +9,12 @@ A Go library and CLI for fetching web pages with automatic caching. Supports pla
 
 - **HTTP + headless browser**: fetch pages via standard HTTP or Playwright-driven Chromium
 - **Blob storage**: cache fetched pages to local filesystem or S3
-- **Request deduplication**: same URL+method+headers+body maps to a deterministic blob key (SHA-256)
+- **Deterministic cache keys**: same URL+method+headers+body maps to a SHA-256 blob key
+- **Version history**: archive timestamped snapshots and diff pages to detect changes
+- **Staleness hints**: check HTTP cache headers or time-based age via `Page.Stale()` / `Page.StaleAfter()`
 - **Rate limiting**: configurable per-request rate limits with exponential backoff
 - **Silent throttle detection**: detect and retry when a site silently serves captcha/block pages
-- **HTTP proxy mode**: expose the fetcher as a caching HTTP proxy with HTTPS CONNECT tunneling
+- **HTTP proxy mode**: caching HTTP proxy with HTTPS CONNECT tunneling (SSRF-safe)
 
 ## CLI Usage
 
@@ -127,14 +129,55 @@ fmt.Println(string(page.Response.Body))
 page, _ = cl.Get(ctx, "https://example.com")
 ```
 
-### Options
+### Client options (construction time)
 
-- `limpet.OptAlwaysBrowser()` - always use headless browser
-- `limpet.OptRateLimit(10)` - set programmatic rate limit
-- `&limpet.OptDoReplace{}` - force re-fetch, bypassing cache
-- `&limpet.OptDoBrowser{}` - use browser for this request
-- `&limpet.OptDoSilentThrottle{PageBytesRegexp: re}` - detect throttled responses
-- `&limpet.OptDoLimiter{Limiter: lim}` - per-request rate limiter
+- `limpet.OptAlwaysBrowser()` -- always use headless browser
+- `limpet.OptRateLimit(10)` -- set programmatic rate limit
+
+### Per-request options (DoConfig)
+
+```go
+page, _ := cl.Do(ctx, req, limpet.DoConfig{
+    Replace:        true,                // force re-fetch, bypassing cache
+    Browser:        true,                // use headless browser for this request
+    Archive:        true,                // store a timestamped snapshot for version history
+    SilentThrottle: regexp.MustCompile(`captcha`), // detect and retry throttled responses
+    Limiter:        rateLimiter,         // per-request rate limiter
+})
+```
+
+### Version history and change detection
+
+```go
+// Fetch with archive to build version history
+page, _ := cl.Do(ctx, req, limpet.DoConfig{Archive: true, Replace: true})
+
+// List all archived snapshots for a request
+versions, _ := cl.Versions(ctx, req)
+for _, v := range versions {
+    fmt.Printf("%s  %s\n", v.FetchedAt, v.Key)
+}
+
+// Read a specific version and compare
+old, _ := cl.Version(ctx, versions[0].Key)
+new, _ := cl.Version(ctx, versions[len(versions)-1].Key)
+diff := limpet.Diff(old, new)
+fmt.Printf("changed=%v old_size=%d new_size=%d\n", diff.Changed, diff.OldSize, diff.NewSize)
+```
+
+### Staleness
+
+```go
+// Check HTTP cache headers (Cache-Control, Expires)
+if page.Stale() {
+    page, _ = cl.Get(ctx, url, limpet.DoConfig{Replace: true})
+}
+
+// Check time-based age (for targets with no cache headers)
+if page.StaleAfter(24 * time.Hour) {
+    page, _ = cl.Get(ctx, url, limpet.DoConfig{Replace: true})
+}
+```
 
 ### Transport (http.RoundTripper)
 
