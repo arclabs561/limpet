@@ -572,6 +572,14 @@ func (c *Client) do(
 }
 
 func (c *Client) blobKey(req *http.Request) (string, []byte, error) {
+	return blobKey(req, c.requestBodyLimit)
+}
+
+// blobKey computes a deterministic cache key from an HTTP request.
+// The key is SHA-256 of (URL + method + headers + body), placed under the
+// request hostname. bodyLimit limits how much of the request body is read
+// (0 means no limit). The request body is restored after reading.
+func blobKey(req *http.Request, bodyLimit int64) (string, []byte, error) {
 	var buf bytes.Buffer
 	buf.WriteString(req.URL.String())
 	buf.WriteString(".")
@@ -581,7 +589,7 @@ func (c *Client) blobKey(req *http.Request) (string, []byte, error) {
 		return "", nil, err
 	}
 	buf.WriteString(".")
-	body, err := c.peekRequestBody(req)
+	body, err := peekRequestBody(req, bodyLimit)
 	if err != nil {
 		return "", nil, err
 	}
@@ -593,12 +601,14 @@ func (c *Client) blobKey(req *http.Request) (string, []byte, error) {
 	return bkey, body, nil
 }
 
-func (c *Client) peekRequestBody(req *http.Request) ([]byte, error) {
+// peekRequestBody reads the request body (up to limit bytes) and replaces it
+// with a fresh reader so it can be sent again.
+func peekRequestBody(req *http.Request, limit int64) ([]byte, error) {
 	var body []byte
 	if req.Body != nil {
 		rdr := req.Body
-		if c.requestBodyLimit > 0 {
-			rdr = http.MaxBytesReader(nil, req.Body, c.requestBodyLimit)
+		if limit > 0 {
+			rdr = http.MaxBytesReader(nil, req.Body, limit)
 		}
 		var err error
 		body, err = io.ReadAll(rdr)
