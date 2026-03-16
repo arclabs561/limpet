@@ -1,9 +1,9 @@
-# limpet - fetch, cache, and deduplicate web requests
+# limpet - fetch, cache, and reuse web requests
 
 [![Go package docs](https://pkg.go.dev/badge/github.com/arclabs561/limpet/badge.svg)](https://pkg.go.dev/github.com/arclabs561/limpet)
 [![Build status](https://github.com/arclabs561/limpet/actions/workflows/main.yml/badge.svg?branch=main&event=push)](https://github.com/arclabs561/limpet/actions)
 
-A Go library and CLI for fetching web pages with automatic caching and deduplication. Supports plain HTTP and headless browser (Playwright/Chromium) requests. Can run as a caching HTTP proxy.
+A Go library and CLI for fetching web pages with automatic caching. Supports plain HTTP and headless browser (Playwright/Chromium) requests. Can run as a caching HTTP proxy with HTTPS CONNECT tunneling.
 
 ## Features
 
@@ -12,7 +12,7 @@ A Go library and CLI for fetching web pages with automatic caching and deduplica
 - **Request deduplication**: same URL+method+headers+body maps to a deterministic blob key (SHA-256)
 - **Rate limiting**: configurable per-request rate limits with exponential backoff
 - **Silent throttle detection**: detect and retry when a site silently serves captcha/block pages
-- **TCP proxy mode**: expose the fetcher as a transparent HTTP proxy
+- **HTTP proxy mode**: expose the fetcher as a caching HTTP proxy with HTTPS CONNECT tunneling
 
 ## CLI Usage
 
@@ -64,6 +64,7 @@ limpet cache get --meta example.com/abc123.json
 | `--cache-ttl` | `24h` | Cache TTL (`0` or `forever` for no expiry) |
 | `-L`, `--log-level` | `fatal` | Log level: `trace`, `debug`, `info`, `warn`, `error`, `fatal` |
 | `-F`, `--log-format` | `auto` | Log format: `auto`, `console` |
+| `-c`, `--log-color` | `auto` | Log color: `auto`, `always`, `never` |
 
 ## Rate Limiting
 
