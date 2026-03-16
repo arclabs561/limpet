@@ -22,9 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hashicorp/go-retryablehttp"
 	"github.com/playwright-community/playwright-go"
-	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"go.uber.org/ratelimit"
 
@@ -59,9 +57,9 @@ func parseRateLimit(raw string) (ratelimit.Limiter, error) {
 	return ratelimit.New(int(rate), opts...), nil
 }
 
-// Client fetches web pages with automatic caching and request deduplication.
+// Client fetches web pages with automatic caching.
 type Client struct {
-	httpClient       *retryablehttp.Client
+	httpClient       *http.Client
 	bucket           *blob.Bucket
 	mu               *sync.Mutex
 	pw               *playwright.Playwright
@@ -118,19 +116,7 @@ func NewClient(
 		opt(c)
 	}
 
-	httpClient := retryablehttp.NewClient()
-	httpClient.HTTPClient = &http.Client{Transport: &http.Transport{}}
-	httpClient.Logger = leveledLogger{log.Ctx(ctx)}
-	httpClient.RequestLogHook = func(_ retryablehttp.Logger, req *http.Request, _ int) {
-		val, ok := req.Context().Value(ctxKeyLimiter{}).(ctxValLimiter)
-		if ok {
-			val.Limiter.Take()
-		} else {
-			c.rateLimit.Take()
-		}
-		c.requests.Add(1)
-	}
-	c.httpClient = httpClient
+	c.httpClient = &http.Client{Transport: &http.Transport{}}
 	c.startBrowser = sync.OnceValue(c.newBrowser)
 
 	if c.alwaysDoBrowser {
@@ -285,6 +271,7 @@ func (c *Client) fetchHTTP(
 
 	var resp *http.Response
 	var body []byte
+	var err error
 	attemptsMax := 5
 	waitMin := 1 * time.Second
 	waitMax := 1 * time.Minute
@@ -307,13 +294,27 @@ func (c *Client) fetchHTTP(
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		rreq, err := retryablehttp.FromRequest(req)
-		if err != nil {
-			return nil, err
+		// Apply rate limiting before each attempt.
+		val, ok := req.Context().Value(ctxKeyLimiter{}).(ctxValLimiter)
+		if ok {
+			val.Limiter.Take()
+		} else {
+			c.rateLimit.Take()
 		}
-		resp, err = c.httpClient.Do(rreq)
+		c.requests.Add(1)
+
+		resp, err = c.httpClient.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("failed to perform http get: %w", err)
+			if lastAttempt := i >= attemptsMax-1; lastAttempt {
+				return nil, fmt.Errorf("failed to perform http request: %w", err)
+			}
+			log.Warn().Err(err).Int("attempt", i).Msg("http request failed, retrying")
+			if err := wait(i); err != nil {
+				return nil, err
+			}
+			// Restore request body for retry.
+			req.Body = io.NopCloser(bytes.NewReader(reqBody))
+			continue
 		}
 		rdr := resp.Body
 		if c.respBodyLimit > 0 {
@@ -679,35 +680,6 @@ type Limiter interface {
 	Take() time.Time
 }
 
-var _ retryablehttp.LeveledLogger = (*leveledLogger)(nil)
-
-type leveledLogger struct{ log *zerolog.Logger }
-
-func (l leveledLogger) fields(keysAndValues []any) *zerolog.Logger {
-	log := l.log.With().CallerWithSkipFrameCount(3)
-	for i := 0; i < len(keysAndValues)-1; i += 2 {
-		key := fmt.Sprintf("%v", keysAndValues[i])
-		log = log.Interface(key, keysAndValues[i+1])
-	}
-	lg := log.Logger()
-	return &lg
-}
-
-func (l leveledLogger) Error(msg string, keysAndValues ...any) {
-	l.fields(keysAndValues).Error().Msg(msg)
-}
-
-func (l leveledLogger) Warn(msg string, keysAndValues ...any) {
-	l.fields(keysAndValues).Warn().Msg(msg)
-}
-
-func (l leveledLogger) Info(msg string, keysAndValues ...any) {
-	l.fields(keysAndValues).Info().Msg(msg)
-}
-
-func (l leveledLogger) Debug(msg string, keysAndValues ...any) {
-	l.fields(keysAndValues).Debug().Msg(msg)
-}
 
 const LatestPageVersion = 1
 
