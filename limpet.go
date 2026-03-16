@@ -501,6 +501,30 @@ func (c *Client) fetchBrowser(
 	}, nil
 }
 
+// readCachedPage reads a cached page from the bucket. Returns the page and
+// its source label, or a *blob.NotFoundError if not cached.
+func readCachedPage(ctx context.Context, bucket *blob.Bucket, key string) (*Page, error) {
+	b, err := bucket.GetBlob(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	page := new(Page)
+	if err := json.Unmarshal(b.Data, page); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal cached page: %w", err)
+	}
+	page.Meta.Source = b.Source
+	return page, nil
+}
+
+// writeCachedPage writes a page to the bucket.
+func writeCachedPage(ctx context.Context, bucket *blob.Bucket, key string, page *Page) error {
+	data, err := json.Marshal(page)
+	if err != nil {
+		return fmt.Errorf("failed to marshal page: %w", err)
+	}
+	return bucket.SetBlob(ctx, key, data)
+}
+
 func (c *Client) do(
 	ctx context.Context,
 	req *http.Request,
@@ -515,20 +539,15 @@ func (c *Client) do(
 	}
 
 	if !opts.Replace {
-		b, err := c.bucket.GetBlob(ctx, bkey)
+		page, err := readCachedPage(ctx, c.bucket, bkey)
 		var notFound *blob.NotFoundError
 		if !errors.As(err, &notFound) {
 			if err != nil {
 				return nil, fmt.Errorf("failed to read from blob: %w", err)
 			}
-			page := new(Page)
-			if err := json.Unmarshal(b.Data, page); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal page: %w", err)
-			}
 			if err := errPageStatusNotOK(page); err != nil {
 				return nil, err
 			}
-			page.Meta.Source = b.Source
 			return page, nil
 		}
 	}
@@ -546,11 +565,7 @@ func (c *Client) do(
 	// Only cache successful (200) responses to prevent transient errors
 	// from becoming permanent cache entries.
 	if page.Response.StatusCode == 200 {
-		b, err := json.Marshal(page)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal page: %w", err)
-		}
-		if err := c.bucket.SetBlob(ctx, bkey, b); err != nil {
+		if err := writeCachedPage(ctx, c.bucket, bkey, page); err != nil {
 			return nil, fmt.Errorf("failed to write page: %w", err)
 		}
 	}
