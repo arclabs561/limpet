@@ -127,6 +127,7 @@ func NewClient(
 	return c, nil
 }
 
+// Close shuts down the browser (if started) and releases resources.
 func (c *Client) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -681,8 +682,10 @@ type Limiter interface {
 }
 
 
+// LatestPageVersion is the current cache page schema version.
 const LatestPageVersion = 1
 
+// Page is a cached HTTP request/response pair with metadata.
 type Page struct {
 	Meta     PageMeta     `json:"meta"`
 	Request  PageRequest  `json:"request"`
@@ -703,6 +706,7 @@ func (p *Page) HTTPResponse() *http.Response {
 	}
 }
 
+// PageMeta contains cache metadata for a fetched page.
 type PageMeta struct {
 	Version   uint16        `json:"version"`
 	Source    string        `json:"-"`
@@ -710,6 +714,7 @@ type PageMeta struct {
 	FetchDur  time.Duration `json:"fetch_dur"`
 }
 
+// PageRequest stores the original HTTP request details.
 type PageRequest struct {
 	URL           string      `json:"url"`
 	RedirectedURL string      `json:"redirected_url,omitempty"`
@@ -718,6 +723,7 @@ type PageRequest struct {
 	Body          []byte      `json:"body,omitempty"`
 }
 
+// PageResponse stores the HTTP response details including the body.
 type PageResponse struct {
 	StatusCode       int         `json:"status_code"`
 	ProtoMajor       int         `json:"proto_major"`
