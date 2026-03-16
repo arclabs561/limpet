@@ -182,6 +182,9 @@ func (c *Client) Do(
 		if c.Browser {
 			cfg.Browser = true
 		}
+		if c.Archive {
+			cfg.Archive = true
+		}
 		if c.SilentThrottle != nil {
 			cfg.SilentThrottle = c.SilentThrottle
 		}
@@ -191,6 +194,7 @@ func (c *Client) Do(
 	}
 	opts := doOptions{
 		Replace:          cfg.Replace,
+		Archive:          cfg.Archive,
 		ReSilentThrottle: cfg.SilentThrottle,
 		Limiter:          cfg.Limiter,
 	}
@@ -251,6 +255,7 @@ func (c *Client) closeBrowser() {
 
 type doOptions struct {
 	Replace          bool
+	Archive          bool
 	ReSilentThrottle *regexp.Regexp
 	Limiter          Limiter
 }
@@ -578,6 +583,11 @@ func (c *Client) do(
 		if err := writeCachedPage(ctx, c.bucket, bkey, page); err != nil {
 			return nil, fmt.Errorf("failed to write page: %w", err)
 		}
+		// Write a timestamped archive snapshot for version history.
+		if opts.Archive {
+			akey := archiveKey(bkey, page.Meta.FetchedAt)
+			_ = writeCachedPage(ctx, c.bucket, akey, page)
+		}
 	}
 
 	log.Info().
@@ -639,6 +649,82 @@ func blobKey(req *http.Request, bodyLimit int64) (string, []byte, error) {
 	return bkey, body, nil
 }
 
+// archiveKey returns a timestamped key for storing a version snapshot.
+// Given "hostname/hash.json" and a time, returns "hostname/hash@20060102T150405.000Z.json".
+// Millisecond precision avoids collisions for rapid sequential fetches.
+func archiveKey(bkey string, t time.Time) string {
+	base := strings.TrimSuffix(bkey, ".json")
+	return base + "@" + t.UTC().Format("20060102T150405.000Z") + ".json"
+}
+
+// archivePrefix returns the prefix for listing all archive snapshots of a key.
+func archivePrefix(bkey string) string {
+	return strings.TrimSuffix(bkey, ".json") + "@"
+}
+
+// PageVersion describes a single archived snapshot of a cached page.
+type PageVersion struct {
+	Key       string    // Cache key for this snapshot.
+	FetchedAt time.Time // When this snapshot was fetched.
+	BodyHash  string    // SHA-256 hex digest of the response body.
+}
+
+// Versions lists all archived snapshots for the given request, ordered by
+// fetch time (oldest first). Returns nil if no archive entries exist.
+func (c *Client) Versions(ctx context.Context, req *http.Request) ([]PageVersion, error) {
+	bkey, _, err := c.blobKey(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute blob key: %w", err)
+	}
+	prefix := archivePrefix(bkey)
+	entries, err := c.bucket.ListCache(prefix)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list archive entries: %w", err)
+	}
+	versions := make([]PageVersion, 0, len(entries))
+	for _, entry := range entries {
+		// Parse timestamp from key: "hostname/hash@20060102T150405Z.json"
+		at := strings.TrimPrefix(entry.Key, strings.TrimSuffix(prefix, "@")+"@")
+		at = strings.TrimSuffix(at, ".json")
+		t, err := time.Parse("20060102T150405.000Z", at)
+		if err != nil {
+			continue // skip malformed entries
+		}
+		versions = append(versions, PageVersion{
+			Key:       entry.Key,
+			FetchedAt: t,
+		})
+	}
+	return versions, nil
+}
+
+// Version reads a specific archived page snapshot by its key.
+func (c *Client) Version(ctx context.Context, key string) (*Page, error) {
+	return readCachedPage(ctx, c.bucket, key)
+}
+
+// Diff compares two pages and returns whether the response body changed.
+func Diff(a, b *Page) PageDiff {
+	aHash := sha256.Sum256(a.Response.Body)
+	bHash := sha256.Sum256(b.Response.Body)
+	return PageDiff{
+		Changed:    aHash != bHash,
+		OldSize:    len(a.Response.Body),
+		NewSize:    len(b.Response.Body),
+		OldFetched: a.Meta.FetchedAt,
+		NewFetched: b.Meta.FetchedAt,
+	}
+}
+
+// PageDiff describes the difference between two page snapshots.
+type PageDiff struct {
+	Changed    bool
+	OldSize    int
+	NewSize    int
+	OldFetched time.Time
+	NewFetched time.Time
+}
+
 // peekRequestBody reads the request body (up to limit bytes) and replaces it
 // with a fresh reader so it can be sent again.
 func peekRequestBody(req *http.Request, limit int64) ([]byte, error) {
@@ -664,6 +750,9 @@ type DoConfig struct {
 	Replace bool
 	// Browser uses headless Chromium instead of plain HTTP.
 	Browser bool
+	// Archive stores a timestamped snapshot alongside the latest cache entry.
+	// Use Client.Versions to list snapshots and detect changes over time.
+	Archive bool
 	// SilentThrottle detects and retries when a site silently serves
 	// captcha/block pages matching this regexp.
 	SilentThrottle *regexp.Regexp
