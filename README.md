@@ -40,6 +40,18 @@ limpet do -X POST https://example.com/api
 
 # Run as a caching HTTP proxy
 limpet proxy -a localhost:8080
+
+# List cached entries
+limpet cache ls
+
+# List cached entries for a specific host
+limpet cache ls example.com
+
+# Read a cached page's response body
+limpet cache get example.com/abc123.json
+
+# Show page metadata (URL, status, fetch time)
+limpet cache get --meta example.com/abc123.json
 ```
 
 ### Global flags
@@ -122,6 +134,35 @@ page, _ = cl.Get(ctx, "https://example.com")
 - `&limpet.OptDoBrowser{}` - use browser for this request
 - `&limpet.OptDoSilentThrottle{PageBytesRegexp: re}` - detect throttled responses
 - `&limpet.OptDoLimiter{Limiter: lim}` - per-request rate limiter
+
+### Transport (http.RoundTripper)
+
+For integrating caching into any `http.Client`:
+
+```go
+bucket, _ := blob.NewBucket(ctx, "file:///tmp/cache", nil)
+defer bucket.Close()
+
+tr := limpet.NewTransport(bucket,
+    limpet.TransportOptRateLimit(10),
+)
+
+client := &http.Client{Transport: tr}
+
+// First call fetches and caches. Second call returns from cache.
+resp, _ := client.Get("https://example.com")
+// resp.Header.Get("X-Limpet-Source") == "fetch" or "cache"
+```
+
+Per-request cache control via context:
+
+```go
+// Skip cache read, force fresh fetch (still caches the result)
+ctx := limpet.WithCachePolicy(ctx, limpet.CachePolicyReplace)
+
+// Bypass cache entirely (no read, no write)
+ctx = limpet.WithCachePolicy(ctx, limpet.CachePolicySkip)
+```
 
 ## License
 
