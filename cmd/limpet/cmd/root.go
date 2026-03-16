@@ -7,20 +7,19 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
-	"github.com/henrywallace/scraper"
-	"github.com/henrywallace/scraper/blob"
+	"github.com/arclabs561/limpet"
+	"github.com/arclabs561/limpet/blob"
 	"github.com/mattn/go-isatty"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"github.com/samber/mo"
 	"github.com/spf13/cobra"
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "scraper",
-	Short: "Scraper is a tool to scrape a url",
-	RunE:  rootRunE,
+	Use:   "limpet",
+	Short: "limpet is a caching HTTP fetcher and proxy",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		ctx := setupLogger(cmd, args)
 		cmd.SetContext(ctx)
@@ -47,7 +46,12 @@ func init() {
 	rootCmd.PersistentFlags().Bool(
 		"no-cache",
 		false,
-		"whether to use the cache",
+		"disable the local cache",
+	)
+	rootCmd.PersistentFlags().String(
+		"cache-ttl",
+		"24h",
+		"cache TTL duration (e.g. 24h, 7d, 0 for no expiry)",
 	)
 	rootCmd.PersistentFlags().StringP(
 		"log-level",
@@ -76,13 +80,15 @@ func init() {
 
 	rootCmd.AddCommand(doCmd)
 	rootCmd.AddCommand(proxyCmd)
-
 }
 
-func setupLogger(
-	cmd *cobra.Command,
-	args []string,
-) context.Context {
+type loggerOptions struct {
+	Level  zerolog.Level
+	Format string
+	Color  string
+}
+
+func setupLogger(cmd *cobra.Command, args []string) context.Context {
 	logLevel, err := zerolog.ParseLevel(mustFlagString(cmd, "log-level"))
 	if err != nil {
 		log.Fatal().Err(err).Send()
@@ -94,62 +100,43 @@ func setupLogger(
 	}
 	ctx := cmd.Context()
 	opts := loggerOptions{
-		Level:  mo.Some(logLevel),
-		Format: mo.Some(logFormat),
-		Color:  mo.Some(logColor),
+		Level:  logLevel,
+		Format: logFormat,
+		Color:  logColor,
 	}
 	return initGlobalLogger(ctx, opts)
 }
 
-var _, lg = initLogger(context.Background(), loggerOptions{}) //nolint:unused
-
-type loggerOptions struct {
-	Level  mo.Option[zerolog.Level]
-	Format mo.Option[string]
-	Color  mo.Option[string]
-}
-
-func initGlobalLogger(
-	ctx context.Context,
-	opts loggerOptions,
-) context.Context {
-	logLvl := opts.Level.OrElse(zerolog.FatalLevel)
-	zerolog.SetGlobalLevel(logLvl)
-	opts.Level = mo.Some(logLvl)
+func initGlobalLogger(ctx context.Context, opts loggerOptions) context.Context {
+	zerolog.SetGlobalLevel(opts.Level)
 	ctx, lg := initLogger(ctx, opts)
 	log.Logger = lg
 	return ctx
 }
 
-func initLogger(
-	ctx context.Context,
-	opts loggerOptions,
-) (context.Context, zerolog.Logger) {
-	// zerolog.ErrorStackMarshaler = pkgerrors.MarshalStack
+func initLogger(ctx context.Context, opts loggerOptions) (context.Context, zerolog.Logger) {
 	lg := zerolog.New(os.Stderr).With().
 		Timestamp().
 		Stack().
 		Caller().
 		Logger()
-	lg.Level(opts.Level.OrElse(zerolog.FatalLevel))
+	lg.Level(opts.Level)
 
 	doConsole := false
-	logFmt := opts.Format.OrElse("auto")
 	out := os.Stderr
 	isTerm := isatty.IsTerminal(out.Fd())
-	switch strings.TrimSpace(strings.ToLower(logFmt)) {
+	switch strings.TrimSpace(strings.ToLower(opts.Format)) {
 	case "", "auto":
 		doConsole = isTerm
 	case "console":
 		doConsole = true
 	default:
-		lg.Fatal().Msgf("unknown log format: %q", logFmt)
-
+		lg.Fatal().Msgf("unknown log format: %q", opts.Format)
 	}
 
 	if doConsole {
 		doColor := false
-		switch strings.ToLower(opts.Color.OrElse("auto")) {
+		switch strings.ToLower(opts.Color) {
 		case "", "auto":
 			doColor = isTerm
 		case "always":
@@ -166,38 +153,41 @@ func initLogger(
 	return lg.WithContext(ctx), lg
 }
 
-func rootRunE(cmd *cobra.Command, args []string) error {
-	setupLogger(cmd, args)
-	return nil
-}
-
-func newScraper(
-	cmd *cobra.Command,
-	args []string,
-) (*scraper.Scraper, error) {
+func newScraper(cmd *cobra.Command, args []string) (*limpet.Scraper, error) {
 	ctx := cmd.Context()
 	bucketURL := mustFlagString(cmd, "bucket-url")
 	cacheDir := mustFlagString(cmd, "cache-dir")
 	noCache := mustFlagBool(cmd, "no-cache")
-	var opts []blob.BucketOption
-	if cacheDir != "" {
-		opts = append(opts, &blob.OptBucketCacheDir{CacheDir: cacheDir})
+	cacheTTLStr := mustFlagString(cmd, "cache-ttl")
+
+	var cacheTTL time.Duration
+	if cacheTTLStr == "0" || cacheTTLStr == "infinite" || cacheTTLStr == "forever" {
+		cacheTTL = -1 // no expiry
+	} else {
+		var err error
+		cacheTTL, err = time.ParseDuration(cacheTTLStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse --cache-ttl=%q: %w", cacheTTLStr, err)
+		}
 	}
-	if noCache {
-		opts = append(opts, &blob.OptBucketNoCache{})
+
+	cfg := &blob.BucketConfig{
+		CacheDir: cacheDir,
+		NoCache:  noCache,
+		CacheTTL: cacheTTL,
 	}
-	blob, err := blob.NewBucket(ctx, bucketURL, opts...)
+	bucket, err := blob.NewBucket(ctx, bucketURL, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bucket: %w", err)
 	}
-	sc, err := scraper.NewScraper(ctx, blob)
+	sc, err := limpet.NewScraper(ctx, bucket)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create scraper: %w", err)
 	}
 	return sc, nil
 }
 
-const appName = "scraper"
+const appName = "limpet"
 
 func getConfigDir() string {
 	homedir, err := os.UserHomeDir()
@@ -210,7 +200,7 @@ func getConfigDir() string {
 			return filepath.Join(xdgConfig, appName)
 		}
 		return filepath.Join(homedir, ".config", appName)
-	case "darwin": // macOS
+	case "darwin":
 		return filepath.Join(homedir, "Library", "Preferences", appName)
 	default:
 		return filepath.Join(homedir, ".config", appName)

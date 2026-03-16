@@ -1,19 +1,16 @@
-module github.com/henrywallace/scraper
+module github.com/arclabs561/limpet
 
 go 1.25.0
 
 require (
-	github.com/DataDog/zstd v1.5.7
 	github.com/aws/aws-sdk-go-v2/config v1.32.11
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.4
 	github.com/dgraph-io/badger/v3 v3.2103.5
-	github.com/hashicorp/go-cleanhttp v0.5.2
 	github.com/hashicorp/go-retryablehttp v0.7.8
+	github.com/klauspost/compress v1.18.4
 	github.com/mattn/go-isatty v0.0.20
 	github.com/playwright-community/playwright-go v0.5700.1
 	github.com/rs/zerolog v1.34.0
-	github.com/samber/lo v1.53.0
-	github.com/samber/mo v1.16.0
 	github.com/spf13/cobra v1.10.2
 	go.uber.org/ratelimit v0.3.1
 	gocloud.dev v0.45.0
@@ -57,8 +54,8 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/google/wire v0.7.0 // indirect
 	github.com/googleapis/gax-go/v2 v2.17.0 // indirect
+	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/klauspost/compress v1.18.4 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect

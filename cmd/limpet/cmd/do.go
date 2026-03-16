@@ -5,14 +5,14 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/henrywallace/scraper"
+	"github.com/arclabs561/limpet"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 )
 
 var doCmd = &cobra.Command{
 	Use:   "do",
-	Short: "Do scrapes the given url(s)",
+	Short: "Fetch the given url(s)",
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
 			return fmt.Errorf("requires a url")
@@ -72,12 +72,12 @@ func doRunE(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
-	var opts []scraper.DoOption
+	var opts []limpet.DoOption
 	if browser {
-		opts = append(opts, &scraper.OptDoBrowser{})
+		opts = append(opts, &limpet.OptDoBrowser{})
 	}
 	if forceRefetch {
-		opts = append(opts, &scraper.OptDoReplace{})
+		opts = append(opts, &limpet.OptDoReplace{})
 	}
 	log.Info().Interface("opts", opts).Msgf("scraping %s", args[0])
 	page, err := sc.Do(ctx, req, opts...)
