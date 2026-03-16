@@ -14,7 +14,6 @@ require (
 	github.com/spf13/cobra v1.10.2
 	go.uber.org/ratelimit v0.3.1
 	gocloud.dev v0.45.0
-	inet.af/tcpproxy v0.0.0-20231102063150-2862066fc2a9
 )
 
 require (
