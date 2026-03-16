@@ -148,12 +148,12 @@ func (c *Client) Close() {
 }
 
 // Get is a convenience method for fetching a URL with GET.
-func (c *Client) Get(ctx context.Context, url string, opts ...DoOption) (*Page, error) {
+func (c *Client) Get(ctx context.Context, url string, cfgs ...DoConfig) (*Page, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	return c.Do(ctx, req, opts...)
+	return c.Do(ctx, req, cfgs...)
 }
 
 // FetchStatusNotOKError is returned when the fetch status is not 200 OK. The
@@ -180,27 +180,35 @@ func (e *FetchThrottledError) Error() string {
 	return "fetch throttled"
 }
 
+// Do fetches the given request, returning a cached result if available.
+// Pass a DoConfig to control caching, browser mode, and rate limiting.
 func (c *Client) Do(
 	ctx context.Context,
 	req *http.Request,
-	options ...DoOption,
+	cfgs ...DoConfig,
 ) (page *Page, err error) {
-	opts := doOptions{}
-	browser := false
-	for _, opt := range options {
-		switch opt := opt.(type) {
-		case *OptDoReplace:
-			opts.Replace = true
-		case *OptDoSilentThrottle:
-			opts.ReSilentThrottle = opt.PageBytesRegexp
-		case *OptDoLimiter:
-			opts.Limiter = opt.Limiter
-		case *OptDoBrowser:
-			browser = true
+	var cfg DoConfig
+	for _, c := range cfgs {
+		if c.Replace {
+			cfg.Replace = true
+		}
+		if c.Browser {
+			cfg.Browser = true
+		}
+		if c.SilentThrottle != nil {
+			cfg.SilentThrottle = c.SilentThrottle
+		}
+		if c.Limiter != nil {
+			cfg.Limiter = c.Limiter
 		}
 	}
+	opts := doOptions{
+		Replace:          cfg.Replace,
+		ReSilentThrottle: cfg.SilentThrottle,
+		Limiter:          cfg.Limiter,
+	}
 	fn := c.fetchHTTP
-	if browser {
+	if cfg.Browser {
 		fn = c.fetchBrowser
 	}
 	return c.do(ctx, req, opts, fn)
@@ -648,14 +656,17 @@ func peekRequestBody(req *http.Request, limit int64) ([]byte, error) {
 	return body, nil
 }
 
-type DoOption interface {
-	doOption()
-}
-
-type OptDoReplace struct{}
-
-type OptDoSilentThrottle struct {
-	PageBytesRegexp *regexp.Regexp
+// DoConfig controls per-request behavior for Client.Do and Client.Get.
+type DoConfig struct {
+	// Replace skips cache read, forcing a fresh fetch (still caches the result).
+	Replace bool
+	// Browser uses headless Chromium instead of plain HTTP.
+	Browser bool
+	// SilentThrottle detects and retries when a site silently serves
+	// captcha/block pages matching this regexp.
+	SilentThrottle *regexp.Regexp
+	// Limiter applies a per-request rate limiter instead of the client default.
+	Limiter Limiter
 }
 
 type ctxKeyLimiter struct{}
@@ -663,20 +674,10 @@ type ctxValLimiter struct {
 	Limiter Limiter
 }
 
-type OptDoLimiter struct {
-	Limiter Limiter
-}
-
+// Limiter is a rate limiter interface compatible with go.uber.org/ratelimit.
 type Limiter interface {
 	Take() time.Time
 }
-
-type OptDoBrowser struct{}
-
-func (o *OptDoReplace) doOption()        {}
-func (o *OptDoSilentThrottle) doOption() {}
-func (o *OptDoLimiter) doOption()        {}
-func (o *OptDoBrowser) doOption()        {}
 
 var _ retryablehttp.LeveledLogger = (*leveledLogger)(nil)
 
