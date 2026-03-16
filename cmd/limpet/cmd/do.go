@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -57,7 +58,7 @@ func init() {
 
 func doRunE(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	cl, err := newClient(cmd, args)
+	cl, err := newClient(cmd)
 	if err != nil {
 		return fmt.Errorf("failed to create client: %w", err)
 	}
@@ -82,12 +83,14 @@ func doRunE(cmd *cobra.Command, args []string) error {
 	log.Info().Interface("opts", opts).Msgf("fetching %s", args[0])
 	page, err := cl.Do(ctx, req, opts...)
 	if err != nil {
-		return fmt.Errorf("failed to fetch: %w", err)
-	}
-	if page.Response.StatusCode >= 400 {
-		log.Error().Msgf("non-200 status code: %d", page.Response.StatusCode)
-	} else {
-		log.Info().Msgf("status code: %d", page.Response.StatusCode)
+		// Non-200 responses come back as FetchStatusNotOKError with the page.
+		var notOK *limpet.FetchStatusNotOKError
+		if errors.As(err, &notOK) {
+			page = notOK.Page
+			log.Warn().Msgf("non-200 status code: %d", page.Response.StatusCode)
+		} else {
+			return fmt.Errorf("failed to fetch: %w", err)
+		}
 	}
 	includeHeaders := mustFlagBool(cmd, "include")
 	if includeHeaders || head {
