@@ -103,15 +103,15 @@ ctx := context.Background()
 bucket, _ := blob.NewBucket(ctx, "file:///tmp/limpet-cache", nil)
 defer bucket.Close()
 
-sc, _ := limpet.NewScraper(ctx, bucket)
-defer sc.Close()
+cl, _ := limpet.NewClient(ctx, bucket)
+defer cl.Close()
 
 // Simple GET with convenience method
-page, _ := sc.Get(ctx, "https://example.com")
+page, _ := cl.Get(ctx, "https://example.com")
 fmt.Println(string(page.Response.Body))
 
 // Second call returns cached result
-page, _ = sc.Get(ctx, "https://example.com")
+page, _ = cl.Get(ctx, "https://example.com")
 ```
 
 ### Options

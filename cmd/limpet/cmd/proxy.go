@@ -32,9 +32,9 @@ func init() {
 
 func proxyRunE(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	sc, err := newScraper(cmd, args)
+	sc, err := newClient(cmd, args)
 	if err != nil {
-		return fmt.Errorf("failed to create scraper: %w", err)
+		return fmt.Errorf("failed to create client: %w", err)
 	}
 	addr := mustFlagString(cmd, "addr")
 	var p tcpproxy.Proxy
@@ -45,7 +45,7 @@ func proxyRunE(cmd *cobra.Command, args []string) error {
 
 type scraperTarget struct {
 	ctx context.Context
-	sc  *limpet.Scraper
+	sc  *limpet.Client
 }
 
 func (s *scraperTarget) HandleConn(downstream net.Conn) {
@@ -83,7 +83,8 @@ func (s *scraperTarget) HandleConn(downstream net.Conn) {
 		resp.ProtoMinor = 1
 	case 1:
 	default:
-		panic(fmt.Errorf("unknown page version: %d", page.Meta.Version))
+		log.Error().Uint16("version", page.Meta.Version).Msg("unknown page version, dropping connection")
+		return
 	}
 
 	resp.Header.Add("X-Limpet-Version", fmt.Sprintf("%d", page.Meta.Version))
