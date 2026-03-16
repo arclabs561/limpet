@@ -255,6 +255,29 @@ func TestPageStale(t *testing.T) {
 	})
 }
 
+func TestPageStaleAfter(t *testing.T) {
+	t.Run("recent fetch is fresh", func(t *testing.T) {
+		p := &Page{Meta: PageMeta{FetchedAt: time.Now()}}
+		if p.StaleAfter(time.Hour) {
+			t.Error("expected fresh when fetched just now")
+		}
+	})
+
+	t.Run("old fetch is stale", func(t *testing.T) {
+		p := &Page{Meta: PageMeta{FetchedAt: time.Now().Add(-2 * time.Hour)}}
+		if !p.StaleAfter(time.Hour) {
+			t.Error("expected stale when fetched 2h ago with 1h maxAge")
+		}
+	})
+
+	t.Run("zero FetchedAt is stale", func(t *testing.T) {
+		p := &Page{}
+		if !p.StaleAfter(time.Hour) {
+			t.Error("expected stale when FetchedAt is zero")
+		}
+	})
+}
+
 func TestErrPageStatusNotOK(t *testing.T) {
 	t.Run("200 returns nil", func(t *testing.T) {
 		page := &Page{Response: PageResponse{StatusCode: 200}}
