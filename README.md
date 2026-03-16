@@ -131,8 +131,8 @@ page, _ = cl.Get(ctx, "https://example.com")
 
 ### Client options (construction time)
 
-- `limpet.OptAlwaysBrowser()` -- always use headless browser
-- `limpet.OptRateLimit(10)` -- set programmatic rate limit
+- `limpet.WithBrowser()` -- always use headless browser
+- `limpet.WithRateLimit(10)` -- set programmatic rate limit
 
 ### Per-request options (DoConfig)
 
@@ -188,7 +188,7 @@ bucket, _ := blob.NewBucket(ctx, "file:///tmp/cache", nil)
 defer bucket.Close()
 
 tr := limpet.NewTransport(bucket,
-    limpet.TransportOptRateLimit(10),
+    limpet.TransportWithRateLimit(10),
 )
 
 client := &http.Client{Transport: tr}

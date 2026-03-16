@@ -30,22 +30,22 @@ type Transport struct {
 // TransportOption configures a Transport.
 type TransportOption func(*Transport)
 
-// TransportOptRateLimit sets a rate limit on outgoing requests.
-func TransportOptRateLimit(rps int, opts ...ratelimit.Option) TransportOption {
+// TransportWithRateLimit sets a rate limit on outgoing requests.
+func TransportWithRateLimit(rps int, opts ...ratelimit.Option) TransportOption {
 	return func(t *Transport) {
 		t.rateLimit = ratelimit.New(rps, opts...)
 	}
 }
 
-// TransportOptRequestBodyLimit sets the maximum request body size used for
+// TransportWithRequestBodyLimit sets the maximum request body size used for
 // cache key computation. 0 means no limit.
-func TransportOptRequestBodyLimit(n int64) TransportOption {
+func TransportWithRequestBodyLimit(n int64) TransportOption {
 	return func(t *Transport) { t.requestBodyLimit = n }
 }
 
-// TransportOptResponseBodyLimit sets the maximum response body size to cache.
+// TransportWithResponseBodyLimit sets the maximum response body size to cache.
 // 0 means no limit.
-func TransportOptResponseBodyLimit(n int64) TransportOption {
+func TransportWithResponseBodyLimit(n int64) TransportOption {
 	return func(t *Transport) { t.respBodyLimit = n }
 }
 

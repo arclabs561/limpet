@@ -80,8 +80,8 @@ func doRunE(cmd *cobra.Command, args []string) error {
 	log.Info().Interface("cfg", cfg).Msgf("fetching %s", args[0])
 	page, err := cl.Do(ctx, req, cfg)
 	if err != nil {
-		// Non-200 responses come back as FetchStatusNotOKError with the page.
-		var notOK *limpet.FetchStatusNotOKError
+		// Non-200 responses come back as StatusError with the page.
+		var notOK *limpet.StatusError
 		if errors.As(err, &notOK) {
 			page = notOK.Page
 			log.Warn().Msgf("non-200 status code: %d", page.Response.StatusCode)

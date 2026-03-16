@@ -76,13 +76,13 @@ type Client struct {
 // Option configures a Client at construction time.
 type Option func(*Client)
 
-// OptAlwaysBrowser configures the client to always use headless browser.
-func OptAlwaysBrowser() Option {
+// WithBrowser configures the client to always use headless browser.
+func WithBrowser() Option {
 	return func(c *Client) { c.alwaysDoBrowser = true }
 }
 
-// OptRateLimit sets a programmatic rate limit, overriding the env var.
-func OptRateLimit(rps int, opts ...ratelimit.Option) Option {
+// WithRateLimit sets a programmatic rate limit, overriding the env var.
+func WithRateLimit(rps int, opts ...ratelimit.Option) Option {
 	return func(c *Client) {
 		c.rateLimit = ratelimit.New(rps, opts...)
 	}
@@ -143,27 +143,27 @@ func (c *Client) Get(ctx context.Context, url string, cfgs ...DoConfig) (*Page, 
 	return c.Do(ctx, req, cfgs...)
 }
 
-// FetchStatusNotOKError is returned when the fetch status is not 200 OK. The
+// StatusError is returned when the HTTP status is not 200 OK. The
 // Page contains the response and status.
-type FetchStatusNotOKError struct {
+type StatusError struct {
 	Page *Page
 }
 
-func (e *FetchStatusNotOKError) Error() string {
+func (e *StatusError) Error() string {
 	return fmt.Sprintf("bad fetch status: %d", e.Page.Response.StatusCode)
 }
 
 func errPageStatusNotOK(page *Page) error {
 	if page.Response.StatusCode != 200 {
-		return &FetchStatusNotOKError{Page: page}
+		return &StatusError{Page: page}
 	}
 	return nil
 }
 
-// FetchThrottledError is returned when the fetch is throttled.
-type FetchThrottledError struct{}
+// ThrottledError is returned when the fetch is throttled.
+type ThrottledError struct{}
 
-func (e *FetchThrottledError) Error() string {
+func (e *ThrottledError) Error() string {
 	return "fetch throttled"
 }
 
@@ -346,7 +346,7 @@ func (c *Client) fetchHTTP(
 				Str("rate", fmt.Sprintf("%0.3f/m", rate)).
 				Msg("silently throttled")
 			if lastAttempt {
-				return nil, &FetchThrottledError{}
+				return nil, &ThrottledError{}
 			}
 			log.Warn().Int("attempt", i).Msg("response is silently throttled, retrying")
 			if err := wait(i); err != nil {
