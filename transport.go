@@ -3,8 +3,6 @@ package limpet
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -143,7 +141,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	// Cache write (200 only).
 	if resp.StatusCode == 200 && policy != CachePolicySkip {
-		t.cacheWrite(req.Context(), key, req, resp, body)
+		page := pageFromRoundTrip(req, resp, body)
+		// Best-effort cache write; errors are silently ignored.
+		_ = writeCachedPage(req.Context(), t.bucket, key, page)
 	}
 
 	resp.Header.Set("X-Limpet-Source", "fetch")
@@ -151,21 +151,18 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func (t *Transport) cacheRead(ctx context.Context, key string) (*http.Response, error) {
-	b, err := t.bucket.GetBlob(ctx, key)
+	page, err := readCachedPage(ctx, t.bucket, key)
 	if err != nil {
 		return nil, err
 	}
-	var page Page
-	if err := json.Unmarshal(b.Data, &page); err != nil {
-		return nil, err
-	}
 	resp := page.HTTPResponse()
-	resp.Header.Set("X-Limpet-Source", b.Source)
+	resp.Header.Set("X-Limpet-Source", page.Meta.Source)
 	return resp, nil
 }
 
-func (t *Transport) cacheWrite(ctx context.Context, key string, req *http.Request, resp *http.Response, body []byte) {
-	page := Page{
+// pageFromRoundTrip constructs a Page from a raw HTTP round-trip result.
+func pageFromRoundTrip(req *http.Request, resp *http.Response, body []byte) *Page {
+	return &Page{
 		Meta: PageMeta{
 			Version:   LatestPageVersion,
 			FetchedAt: time.Now(),
@@ -185,13 +182,5 @@ func (t *Transport) cacheWrite(ctx context.Context, key string, req *http.Reques
 			Body:             body,
 			Trailer:          resp.Trailer,
 		},
-	}
-	data, err := json.Marshal(page)
-	if err != nil {
-		return
-	}
-	var notFound *blob.NotFoundError
-	if err := t.bucket.SetBlob(ctx, key, data); err != nil && !errors.As(err, &notFound) {
-		return
 	}
 }
