@@ -292,9 +292,9 @@ func TestErrPageStatusNotOK(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for 404, got nil")
 		}
-		var notOK *FetchStatusNotOKError
+		var notOK *StatusError
 		if !errors.As(err, &notOK) {
-			t.Errorf("error is not FetchStatusNotOKError: %T", err)
+			t.Errorf("error is not StatusError: %T", err)
 		}
 		if notOK.Page != page {
 			t.Error("error does not reference the original page")

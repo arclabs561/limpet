@@ -92,7 +92,7 @@ func (s *proxyTarget) HandleConn(downstream net.Conn) {
 	if err != nil {
 		// If the fetch succeeded but returned non-200, forward the response
 		// instead of dropping the connection.
-		var notOK *limpet.FetchStatusNotOKError
+		var notOK *limpet.StatusError
 		if errors.As(err, &notOK) {
 			page = notOK.Page
 		} else {
