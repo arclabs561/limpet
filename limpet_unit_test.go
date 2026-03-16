@@ -50,9 +50,15 @@ func TestParseRateLimit(t *testing.T) {
 func TestBlobKey(t *testing.T) {
 	c := &Client{}
 
-	t.Run("deterministic", func(t *testing.T) {
+	t.Run("deterministic with headers", func(t *testing.T) {
 		req1, _ := http.NewRequest("GET", "https://example.com/page", nil)
+		req1.Header.Set("Accept", "text/html")
+		req1.Header.Set("User-Agent", "limpet/test")
+		req1.Header.Set("X-Custom", "value")
 		req2, _ := http.NewRequest("GET", "https://example.com/page", nil)
+		req2.Header.Set("X-Custom", "value")
+		req2.Header.Set("Accept", "text/html")
+		req2.Header.Set("User-Agent", "limpet/test")
 
 		key1, _, err := c.blobKey(req1)
 		if err != nil {

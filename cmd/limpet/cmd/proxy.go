@@ -32,23 +32,23 @@ func init() {
 
 func proxyRunE(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	sc, err := newClient(cmd, args)
+	cl, err := newClient(cmd, args)
 	if err != nil {
 		return fmt.Errorf("failed to create client: %w", err)
 	}
 	addr := mustFlagString(cmd, "addr")
 	var p tcpproxy.Proxy
-	p.AddRoute(addr, &scraperTarget{ctx, sc})
+	p.AddRoute(addr, &proxyTarget{ctx, cl})
 	log.Debug().Str("addr", addr).Msg("starting proxy server")
 	return p.Run()
 }
 
-type scraperTarget struct {
+type proxyTarget struct {
 	ctx context.Context
-	sc  *limpet.Client
+	cl *limpet.Client
 }
 
-func (s *scraperTarget) HandleConn(downstream net.Conn) {
+func (s *proxyTarget) HandleConn(downstream net.Conn) {
 	defer downstream.Close()
 
 	tcp, ok := downstream.(*net.TCPConn)
@@ -69,7 +69,7 @@ func (s *scraperTarget) HandleConn(downstream net.Conn) {
 	log.Debug().Str("host", req.URL.Host).Str("path", req.URL.Path).Msg("processing request")
 
 	start := time.Now()
-	page, err := s.sc.Do(s.ctx, req)
+	page, err := s.cl.Do(s.ctx, req)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get page")
 		return
@@ -77,12 +77,7 @@ func (s *scraperTarget) HandleConn(downstream net.Conn) {
 	doDur := time.Since(start)
 
 	resp := page.HTTPResponse()
-	switch page.Meta.Version {
-	case 0:
-		resp.ProtoMajor = 1
-		resp.ProtoMinor = 1
-	case 1:
-	default:
+	if page.Meta.Version != limpet.LatestPageVersion {
 		log.Error().Uint16("version", page.Meta.Version).Msg("unknown page version, dropping connection")
 		return
 	}
