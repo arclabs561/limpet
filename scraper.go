@@ -1,4 +1,4 @@
-package scraper
+package limpet
 
 import (
 	"bytes"
@@ -21,43 +21,29 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/playwright-community/playwright-go"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"github.com/samber/lo"
 	"go.uber.org/ratelimit"
 
-	"github.com/henrywallace/scraper/blob"
+	"github.com/arclabs561/limpet/blob"
 )
-
-var veryStart = time.Now()
-var requests atomic.Uint64
-
-var envRateLimit = "SCRAPER_RATE_LIMIT"
-var rateLimitOverride ratelimit.Limiter
-var defaultRateRPS = 100
-var defaultRateLimit = ratelimit.New(defaultRateRPS)
 
 var reNumericPrefix = regexp.MustCompile(`^\d+`)
 
-func init() {
-	rateLimitRaw, ok := os.LookupEnv(envRateLimit)
-	if !ok {
-		// log.Debug().Msgf("%s not set, using default %d/s", envRateLimit, defaultRateRPS)
-		return
-	}
-	switch strings.ToLower(rateLimitRaw) {
-	case "none", "unlimited", "disabled", "off", "nolimit":
-		rateLimitOverride = ratelimit.NewUnlimited()
-		return
-	}
+func toPtr[T any](v T) *T { return &v }
 
-	parts := strings.SplitN(rateLimitRaw, "/", 2)
+// parseRateLimit parses a rate limit string like "100", "10/1m", or "none".
+func parseRateLimit(raw string) (ratelimit.Limiter, error) {
+	switch strings.ToLower(raw) {
+	case "none", "unlimited", "disabled", "off", "nolimit":
+		return ratelimit.NewUnlimited(), nil
+	}
+	parts := strings.SplitN(raw, "/", 2)
 	rate, err := strconv.ParseInt(parts[0], 10, 0)
 	if err != nil {
-		log.Fatal().Msgf("failed to parse %s=%q: %v", envRateLimit, rateLimitRaw, err)
+		return nil, fmt.Errorf("failed to parse rate %q: %w", raw, err)
 	}
 	var opts []ratelimit.Option
 	if len(parts) == 2 {
@@ -67,11 +53,11 @@ func init() {
 		}
 		dur, err := time.ParseDuration(per)
 		if err != nil {
-			log.Fatal().Msgf("failed to parse %s=%q: %v", envRateLimit, rateLimitRaw, err)
+			return nil, fmt.Errorf("failed to parse rate duration %q: %w", raw, err)
 		}
 		opts = append(opts, ratelimit.Per(dur))
 	}
-	rateLimitOverride = ratelimit.New(int(rate), opts...)
+	return ratelimit.New(int(rate), opts...), nil
 }
 
 type Scraper struct {
@@ -84,46 +70,68 @@ type Scraper struct {
 	startBrowser     func() error
 	requestBodyLimit int64 // no limit when <= 0
 	respBodyLimit    int64 // no limit when <= 0
+	rateLimit        ratelimit.Limiter
+	startedAt        time.Time
+	requests         atomic.Uint64
+}
+
+// Option configures a Scraper at construction time.
+type Option func(*Scraper)
+
+// OptAlwaysBrowser configures the scraper to always use headless browser.
+func OptAlwaysBrowser() Option {
+	return func(s *Scraper) { s.alwaysDoBrowser = true }
+}
+
+// OptRateLimit sets a programmatic rate limit, overriding the env var.
+func OptRateLimit(rps int, opts ...ratelimit.Option) Option {
+	return func(s *Scraper) {
+		s.rateLimit = ratelimit.New(rps, opts...)
+	}
 }
 
 func NewScraper(
 	ctx context.Context,
-	blob *blob.Bucket,
+	bucket *blob.Bucket,
 	opts ...Option,
 ) (*Scraper, error) {
-	httpClient := retryablehttp.NewClient()
-	httpClient.HTTPClient = cleanhttp.DefaultClient() // not pooled, for "fresh" scraping
-	httpClient.Logger = leveledLogger{log.Ctx(ctx)}
-	httpClient.RequestLogHook = func(t retryablehttp.Logger, req *http.Request, i int) {
-		if rateLimitOverride != nil {
-			rateLimitOverride.Take()
-		} else {
-			val, ok := req.Context().Value(ctxKeyLimiter{}).(ctxValLimiter)
-			if ok {
-				val.Limiter.Take()
-			} else {
-				defaultRateLimit.Take()
-			}
-		}
-		requests.Add(1)
-	}
 	s := &Scraper{
-		httpClient:       httpClient,
-		bucket:           blob,
+		bucket:           bucket,
 		mu:               new(sync.Mutex),
-		pw:               nil,
-		browser:          nil,
-		alwaysDoBrowser:  false,
-		startBrowser:     nil,
 		requestBodyLimit: 10e6,  // 10 MB
 		respBodyLimit:    100e6, // 100 MB
+		rateLimit:        ratelimit.New(100),
+		startedAt:        time.Now(),
 	}
-	s.startBrowser = sync.OnceValue(s.newBrowser)
+
+	// Check env var for rate limit override.
+	if raw, ok := os.LookupEnv("LIMPET_RATE_LIMIT"); ok {
+		lim, err := parseRateLimit(raw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse LIMPET_RATE_LIMIT=%q: %w", raw, err)
+		}
+		s.rateLimit = lim
+	}
+
 	for _, opt := range opts {
-		opt.option(s)
+		opt(s)
 	}
-	// If always do browser, then fail fast, until waiting for the first
-	// Do.
+
+	httpClient := retryablehttp.NewClient()
+	httpClient.HTTPClient = &http.Client{Transport: &http.Transport{}}
+	httpClient.Logger = leveledLogger{log.Ctx(ctx)}
+	httpClient.RequestLogHook = func(_ retryablehttp.Logger, req *http.Request, _ int) {
+		val, ok := req.Context().Value(ctxKeyLimiter{}).(ctxValLimiter)
+		if ok {
+			val.Limiter.Take()
+		} else {
+			s.rateLimit.Take()
+		}
+		s.requests.Add(1)
+	}
+	s.httpClient = httpClient
+	s.startBrowser = sync.OnceValue(s.newBrowser)
+
 	if s.alwaysDoBrowser {
 		if err := s.startBrowser(); err != nil {
 			return nil, err
@@ -135,29 +143,16 @@ func NewScraper(
 func (s *Scraper) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	s.closeBrowser()
 }
 
-type Option interface {
-	option(s *Scraper) optionSeal
-}
-
-type optionSeal struct{}
-
-type option struct {
-	fn func(s *Scraper)
-}
-
-func (o *option) option(s *Scraper) optionSeal {
-	o.fn(s)
-	return optionSeal{}
-}
-
-func OptScraperAlwaysDoBrowser() Option {
-	return &option{func(s *Scraper) {
-		s.alwaysDoBrowser = true
-	}}
+// Get is a convenience method for fetching a URL with GET.
+func (s *Scraper) Get(ctx context.Context, url string, opts ...DoOption) (*Page, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	return s.Do(ctx, req, opts...)
 }
 
 // FetchStatusNotOKError is returned when the fetch status is not 200 OK. The
@@ -172,9 +167,7 @@ func (e *FetchStatusNotOKError) Error() string {
 
 func errPageStatusNotOK(page *Page) error {
 	if page.Response.StatusCode != 200 {
-		return &FetchStatusNotOKError{
-			Page: page,
-		}
+		return &FetchStatusNotOKError{Page: page}
 	}
 	return nil
 }
@@ -191,11 +184,7 @@ func (s *Scraper) Do(
 	req *http.Request,
 	options ...DoOption,
 ) (page *Page, err error) {
-	opts := doOptions{
-		Replace:          false,
-		ReSilentThrottle: nil,
-		Limiter:          nil,
-	}
+	opts := doOptions{}
 	browser := false
 	for _, opt := range options {
 		switch opt := opt.(type) {
@@ -207,8 +196,6 @@ func (s *Scraper) Do(
 			opts.Limiter = opt.Limiter
 		case *OptDoBrowser:
 			browser = true
-		default:
-			panic(fmt.Sprintf("invalid fetch option: %T", opt))
 		}
 	}
 	fn := s.fetchHTTP
@@ -272,8 +259,6 @@ type doOptions struct {
 	Limiter          Limiter
 }
 
-// ctx is not added to req
-// already read body from req
 type fetchFn func(
 	ctx context.Context,
 	req *http.Request,
@@ -281,11 +266,6 @@ type fetchFn func(
 	opts doOptions,
 ) (*Page, error)
 
-// fetchHTTP retrieves the content of a given HTTP request and returns it
-// structured in a Page.
-//
-// To prevent potential DoS we use http.MaxBytesReader to cap the size of the
-// request body that can be read.
 func (s *Scraper) fetchHTTP(
 	ctx context.Context,
 	req *http.Request,
@@ -294,11 +274,6 @@ func (s *Scraper) fetchHTTP(
 ) (*Page, error) {
 	start := time.Now()
 
-	// Retry, as reading the body can fail outside the purview of the
-	// retryablehttp api. Or, the read body could indicate that the request
-	// should be retried. The alternative of adding it to the CheckRetry
-	// func would be too awkward as it would involve conditionally
-	// forwarding an already read body.
 	var resp *http.Response
 	var body []byte
 	attemptsMax := 5
@@ -312,13 +287,11 @@ func (s *Scraper) fetchHTTP(
 			d = waitMax
 		}
 		t := time.After(d)
-		for {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-t:
-				return nil
-			}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t:
+			return nil
 		}
 	}
 	for i := 0; i < attemptsMax; i++ {
@@ -337,10 +310,8 @@ func (s *Scraper) fetchHTTP(
 		if s.respBodyLimit > 0 {
 			rdr = http.MaxBytesReader(nil, resp.Body, s.respBodyLimit)
 		}
-		// Add custom headers for original compression state
 		if resp.Uncompressed {
 			resp.Header.Add("X-Uncompressed-Content", "true")
-			// If the original content encoding is important, store that too.
 			originalContentEncoding := resp.Header.Get("Content-Encoding")
 			if originalContentEncoding != "" {
 				resp.Header.Add("X-Original-Content-Encoding", originalContentEncoding)
@@ -362,8 +333,8 @@ func (s *Scraper) fetchHTTP(
 			continue
 		}
 		if opts.ReSilentThrottle != nil && opts.ReSilentThrottle.Match(body) {
-			n := requests.Load()
-			rate := float64(n) / (time.Since(veryStart).Minutes())
+			n := s.requests.Load()
+			rate := float64(n) / (time.Since(s.startedAt).Minutes())
 			log.Warn().
 				Str("rate", fmt.Sprintf("%0.3f/m", rate)).
 				Msg("silently throttled")
@@ -386,11 +357,10 @@ func (s *Scraper) fetchHTTP(
 	dur := time.Since(start)
 	return &Page{
 		Meta: PageMeta{
-			Version:     LatestPageVersion,
-			Source:      "http.plain",
-			RetrieveDur: time.Since(start),
-			FetchedAt:   time.Now(),
-			FetchDur:    dur,
+			Version:   LatestPageVersion,
+			Source:    "http.plain",
+			FetchedAt: time.Now(),
+			FetchDur:  dur,
 		},
 		Request: PageRequest{
 			URL:           req.URL.String(),
@@ -419,8 +389,6 @@ func (s *Scraper) fetchBrowser(
 	opts doOptions,
 ) (*Page, error) {
 	if s.browser == nil {
-		// As scrapers do not always do browser requests, we lazily
-		// start the browser.
 		if err := s.startBrowser(); err != nil {
 			return nil, fmt.Errorf("failed to start browser: %w", err)
 		}
@@ -432,16 +400,13 @@ func (s *Scraper) fetchBrowser(
 		return nil, fmt.Errorf("browser only supports requests with GET method")
 	}
 
-	context, err := s.browser.NewContext(playwright.BrowserNewContextOptions{
-		// From docs when using Browser.Route: "We recommend disabling
-		// Service Workers when using request interception by setting
-		// `Browser.newContext.serviceWorkers` to `'block'`."
+	bctx, err := s.browser.NewContext(playwright.BrowserNewContextOptions{
 		ServiceWorkers: playwright.ServiceWorkerPolicyBlock,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("could not create context: %w", err)
 	}
-	defer context.Close()
+	defer bctx.Close()
 
 	fulfill := func(route playwright.Route, fn func() (*Page, error)) {
 		page, err := fn()
@@ -451,10 +416,7 @@ func (s *Scraper) fetchBrowser(
 				Status: playwright.Int(http.StatusInternalServerError),
 			})
 			if err2 != nil {
-				log.Err(err2).Msgf(
-					"failed to fulfill route (%d)",
-					http.StatusInternalServerError,
-				)
+				log.Err(err2).Msgf("failed to fulfill route (%d)", http.StatusInternalServerError)
 			}
 			return
 		}
@@ -463,29 +425,21 @@ func (s *Scraper) fetchBrowser(
 			headers[key] = page.Response.Header.Get(key)
 		}
 		err = route.Fulfill(playwright.RouteFulfillOptions{
-			Body: page.Response.Body,
-			// ContentType: why is this separate from headers?
+			Body:    page.Response.Body,
 			Headers: headers,
 			Status:  playwright.Int(page.Response.StatusCode),
 		})
 		if err != nil {
-			log.Err(err).Msgf(
-				"failed to fulfill route (%d)",
-				page.Response.StatusCode,
-			)
-			return
+			log.Err(err).Msgf("failed to fulfill route (%d)", page.Response.StatusCode)
 		}
 	}
-	err = context.Route("**/*", func(route playwright.Route) {
+	err = bctx.Route("**/*", func(route playwright.Route) {
 		fulfill(route, func() (*Page, error) {
 			req := route.Request()
 			r, err := http.NewRequest(req.Method(), req.URL(), nil)
 			if err != nil {
 				return nil, fmt.Errorf("failed to make new request: %w", err)
 			}
-			// req.Headers() does not include security headers such
-			// as, as opposed to req.AllHeaders(). And the headers
-			// are lower-cased.
 			r.Header = make(http.Header)
 			for k, v := range req.Headers() {
 				r.Header.Set(k, v)
@@ -497,7 +451,7 @@ func (s *Scraper) fetchBrowser(
 		return nil, fmt.Errorf("failed to intercept browser routes: %w", err)
 	}
 
-	browserPage, err := context.NewPage()
+	browserPage, err := bctx.NewPage()
 	if err != nil {
 		return nil, fmt.Errorf("could not create page: %w", err)
 	}
@@ -562,7 +516,7 @@ func (s *Scraper) do(
 
 	if !opts.Replace {
 		b, err := s.bucket.GetBlob(ctx, bkey)
-		if !errors.As(err, lo.ToPtr(&blob.NotFoundError{})) {
+		if !errors.As(err, toPtr(&blob.NotFoundError{})) {
 			if err != nil {
 				return nil, fmt.Errorf("failed to read from blob: %w", err)
 			}
@@ -587,16 +541,19 @@ func (s *Scraper) do(
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch page: %w", err)
 	}
-	b, err := json.Marshal(page)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal page: %w", err)
+
+	// Only cache successful (200) responses to prevent transient errors
+	// from becoming permanent cache entries.
+	if page.Response.StatusCode == 200 {
+		b, err := json.Marshal(page)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal page: %w", err)
+		}
+		if err := s.bucket.SetBlob(ctx, bkey, b); err != nil {
+			return nil, fmt.Errorf("failed to write page: %w", err)
+		}
 	}
-	if err := s.bucket.SetBlob(ctx, bkey, b); err != nil {
-		return nil, fmt.Errorf("failed to write page: %w", err)
-	}
-	if err := errPageStatusNotOK(page); err != nil {
-		return nil, err
-	}
+
 	log.Info().
 		Stringer("url", req.URL).
 		Str("method", page.Request.Method).
@@ -605,53 +562,38 @@ func (s *Scraper) do(
 		Stringer("dur", time.Since(start).Round(time.Millisecond)).
 		Str("content_type", page.Response.Header.Get("Content-Type")).
 		Str("req_body", string(reqBody)).
-		Msg("fetched http page")
+		Msg("fetched page")
+
+	if err := errPageStatusNotOK(page); err != nil {
+		return nil, err
+	}
 	return page, nil
 }
 
 func (s *Scraper) blobKey(req *http.Request) (string, []byte, error) {
-	buf := new(bytes.Buffer)
-	if _, err := buf.WriteString(req.URL.String()); err != nil {
+	var buf bytes.Buffer
+	buf.WriteString(req.URL.String())
+	buf.WriteString(".")
+	buf.WriteString(req.Method)
+	buf.WriteString(".")
+	if err := req.Header.WriteSubset(&buf, nil); err != nil {
 		return "", nil, err
 	}
-	if _, err := buf.WriteString("."); err != nil {
-		return "", nil, err
-	}
-	if _, err := buf.WriteString(req.Method); err != nil {
-		return "", nil, err
-	}
-	if _, err := buf.WriteString("."); err != nil {
-		return "", nil, err
-	}
-	if err := req.Header.WriteSubset(buf, nil); err != nil {
-		return "", nil, err
-	}
-	if _, err := buf.WriteString("."); err != nil {
-		return "", nil, err
-	}
+	buf.WriteString(".")
 	body, err := s.peekRequestBody(req)
 	if err != nil {
 		return "", nil, err
 	}
-	if _, err := buf.Write(body); err != nil {
-		return "", nil, err
-	}
-	if _, err := buf.WriteString("."); err != nil {
-		return "", nil, err
-	}
+	buf.Write(body)
+	buf.WriteString(".")
 	h := sha256.Sum256(buf.Bytes())
-	henc := base64.RawURLEncoding.EncodeToString(h[:]) //nolint:misspell
+	henc := base64.RawURLEncoding.EncodeToString(h[:])
 	bkey := filepath.Join(req.URL.Hostname(), henc) + ".json"
 	return bkey, body, nil
 }
 
-// Preserve and limit the original request body for multiple reads:
-// once for persistence on the Page, and then again to restore the
-// original request's then drained body.
 func (s *Scraper) peekRequestBody(req *http.Request) ([]byte, error) {
 	var body []byte
-	// MaxBytesReader panics if req.Body is nil, so we must protect against
-	// it.
 	if req.Body != nil {
 		rdr := req.Body
 		if s.requestBodyLimit > 0 {
@@ -663,8 +605,6 @@ func (s *Scraper) peekRequestBody(req *http.Request) ([]byte, error) {
 			return nil, fmt.Errorf("failed to read http req body: %w", err)
 		}
 	}
-	// Best to always do this even when req.Body == nil, to avoid subtle
-	// downstream differences between the original body and io.NopCloser.
 	req.Body = io.NopCloser(bytes.NewBuffer(body))
 	return body, nil
 }
@@ -707,19 +647,10 @@ func (l leveledLogger) fields(keysAndValues []any) *zerolog.Logger {
 	log := l.log.With().CallerWithSkipFrameCount(3)
 	for i := 0; i < len(keysAndValues)-1; i += 2 {
 		key := fmt.Sprintf("%v", keysAndValues[i])
-		val := keysAndValues[i+1]
-		switch val := val.(type) {
-		case int:
-			log = log.Int(key, val)
-		case string:
-			log = log.Str(key, val)
-		case fmt.Stringer:
-			log = log.Stringer(key, val)
-		default:
-			log = log.Interface(key, val)
-		}
+		log = log.Interface(key, keysAndValues[i+1])
 	}
-	return lo.ToPtr(log.Logger())
+	lg := log.Logger()
+	return &lg
 }
 
 func (l leveledLogger) Error(msg string, keysAndValues ...any) {
@@ -746,12 +677,25 @@ type Page struct {
 	Response PageResponse `json:"response"`
 }
 
+// HTTPResponse reconstructs a standard *http.Response from the cached page.
+func (p *Page) HTTPResponse() *http.Response {
+	return &http.Response{
+		StatusCode:       p.Response.StatusCode,
+		ProtoMajor:       p.Response.ProtoMajor,
+		ProtoMinor:       p.Response.ProtoMinor,
+		Header:           p.Response.Header,
+		Body:             io.NopCloser(bytes.NewReader(p.Response.Body)),
+		ContentLength:    p.Response.ContentLength,
+		TransferEncoding: p.Response.TransferEncoding,
+		Trailer:          p.Response.Trailer,
+	}
+}
+
 type PageMeta struct {
-	Version     uint16        `json:"version"`
-	Source      string        `json:"-"`
-	RetrieveDur time.Duration `json:"-"`
-	FetchedAt   time.Time     `json:"fetched_at"`
-	FetchDur    time.Duration `json:"fetch_dur"`
+	Version   uint16        `json:"version"`
+	Source    string        `json:"-"`
+	FetchedAt time.Time     `json:"fetched_at"`
+	FetchDur  time.Duration `json:"fetch_dur"`
 }
 
 type PageRequest struct {

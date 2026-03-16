@@ -16,11 +16,6 @@ jobs:
     - uses: actions/setup-node@v4
       with:
         node-version: "18.17"
-    # Always save cache for apt/lists, as the playwright install --with-deps
-    # below will do an apt-get upgrade under the hood, which we want to save no
-    # matter the success of subsequent step success.
-    #
-    # https://github.com/actions/cache/tree/main/save#always-save-cache
     - uses: actions/cache@v4
       if: always()
       with:
@@ -38,12 +33,7 @@ jobs:
     - env:
         LOG_LEVEL: trace
         TEST_LIVE_HTTP: "true"
-      run: go test -v ./...
-  coverage:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - uses: codecov/codecov-action@v3
+      run: go test -v -tags test_all ./...
   security:
     runs-on: ubuntu-latest
     steps:
@@ -56,7 +46,7 @@ jobs:
     - uses: actions/setup-go@v5
       with:
         go-version: "1.25"
-    - uses: golangci/golangci-lint-action@v3
+    - uses: golangci/golangci-lint-action@v6
       with:
         version: latest
         args: --timeout=10m

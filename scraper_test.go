@@ -1,7 +1,7 @@
 //go:build test_all && !test_live_http
 // +build test_all,!test_live_http
 
-package scraper_test
+package limpet_test
 
 import (
 	"context"
@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/henrywallace/scraper"
-	"github.com/henrywallace/scraper/blob"
+	"github.com/arclabs561/limpet"
+	"github.com/arclabs561/limpet/blob"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -94,7 +94,7 @@ func TestScraperDoBrowser(t *testing.T) {
 		t.Fatalf("failed to create request: %v", err)
 	}
 
-	page, err := ts.scraper.Do(ts.ctx, req, &scraper.OptDoBrowser{})
+	page, err := ts.scraper.Do(ts.ctx, req, &limpet.OptDoBrowser{})
 	if err != nil {
 		t.Fatalf("failed to do request: %v", err)
 	}
@@ -130,7 +130,7 @@ func setLive(t *testing.T) {
 type testState struct {
 	ctx     context.Context
 	bucket  *blob.Bucket
-	scraper *scraper.Scraper
+	scraper *limpet.Scraper
 }
 
 func setup(t *testing.T) testState {
@@ -149,13 +149,13 @@ func setup(t *testing.T) testState {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
 	t.Cleanup(func() { os.RemoveAll(cacheDir) })
-	bucket, err := blob.NewBucket(ctx, bucketURL, &blob.OptBucketCacheDir{CacheDir: cacheDir})
+	bucket, err := blob.NewBucket(ctx, bucketURL, &blob.BucketConfig{CacheDir: cacheDir})
 	if err != nil {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
 	t.Cleanup(func() { bucket.Close() })
 
-	sc, err := scraper.NewScraper(ctx, bucket)
+	sc, err := limpet.NewScraper(ctx, bucket)
 	if err != nil {
 		t.Fatalf("failed to create scraper: %v", err)
 	}

@@ -5,99 +5,87 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
-	"github.com/DataDog/zstd"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/dgraph-io/badger/v3"
+	"github.com/klauspost/compress/zstd"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"github.com/samber/lo"
-	"github.com/samber/mo"
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/fileblob"
 	"gocloud.dev/blob/s3blob"
 	"gocloud.dev/gcerrors"
 )
 
-const defaultCacheDir = ".cache/scraper/blob/"
+const defaultCacheDir = ".cache/limpet/blob/"
 const defaultCacheTTL = 24 * time.Hour
 
-type Bucket struct {
-	prefix string
-	bucket *blob.Bucket
-	cache  *badger.DB
+// BucketConfig configures a Bucket.
+type BucketConfig struct {
+	CacheDir string
+	NoCache  bool
+	CacheTTL time.Duration // 0 means use default (24h), negative means no expiry
 }
+
+type Bucket struct {
+	prefix   string
+	bucket   *blob.Bucket
+	cache    *badger.DB
+	cacheTTL time.Duration
+}
+
+func toPtr[T any](v T) *T { return &v }
 
 func NewBucket(
 	ctx context.Context,
 	bucketURL string,
-	options ...BucketOption,
+	cfg *BucketConfig,
 ) (*Bucket, error) {
-	log := log.Ctx(ctx)
-	var disableCache bool
-	for _, opt := range options {
-		switch opt := opt.(type) {
-		case *OptBucketNoCache:
-			disableCache = opt.NoCache
-		}
+	if cfg == nil {
+		cfg = &BucketConfig{}
 	}
+	cacheTTL := defaultCacheTTL
+	if cfg.CacheTTL > 0 {
+		cacheTTL = cfg.CacheTTL
+	} else if cfg.CacheTTL < 0 {
+		cacheTTL = 0 // no expiry
+	}
+
 	var cache *badger.DB
-	var err error
-	if !disableCache {
-		cacheDir := defaultCacheDir
-		for _, opt := range options {
-			switch opt := opt.(type) {
-			case *OptBucketCacheDir:
-				cacheDir = opt.CacheDir
-			}
+	if !cfg.NoCache {
+		cacheDir := cfg.CacheDir
+		if cacheDir == "" {
+			cacheDir = defaultCacheDir
 		}
 		cacheOpts := badger.DefaultOptions(cacheDir).
-			WithLogger(newBadgerLogger(*log))
+			WithLogger(newBadgerLogger(*log.Ctx(ctx)))
+		var err error
 		cache, err = badger.Open(cacheOpts)
 		if err != nil {
 			return nil, err
 		}
-		log.Debug().Str("dir", cacheDir).Msg("opened badger cache")
+		log.Ctx(ctx).Debug().Str("dir", cacheDir).Msg("opened badger cache")
 	}
 	bucket, err := newBucket(ctx, bucketURL)
 	if err != nil {
 		return nil, err
 	}
 	return &Bucket{
-		prefix: "", // not namespaced
-		bucket: bucket,
-		cache:  cache,
+		prefix:   "",
+		bucket:   bucket,
+		cache:    cache,
+		cacheTTL: cacheTTL,
 	}, nil
 }
-
-type BucketOption interface {
-	bucketOption()
-}
-
-type OptBucketCacheDir struct {
-	CacheDir string
-}
-
-type OptBucketNoCache struct {
-	NoCache bool
-}
-
-func (o *OptBucketCacheDir) bucketOption() {}
-func (o *OptBucketNoCache) bucketOption()  {}
-
-var reBucketURL = regexp.MustCompile(`^\w+://`)
 
 func newBucket(
 	ctx context.Context,
 	bucketURL string,
 ) (*blob.Bucket, error) {
-	log := log.Ctx(ctx)
-	if !reBucketURL.MatchString(bucketURL) {
+	if !strings.Contains(bucketURL, "://") {
 		bucketURL = "file://" + bucketURL
 	}
 	var bucket *blob.Bucket
@@ -128,25 +116,8 @@ func newBucket(
 			bucketURL,
 		)
 	}
-	log.Debug().Str("url", bucketURL).Msg("opened bucket")
+	log.Ctx(ctx).Debug().Str("url", bucketURL).Msg("opened bucket")
 	return bucket, nil
-}
-
-// WithPrefix returns a new bucket with the given prefix.
-func (bu *Bucket) WithPrefix(prefix string) *Bucket {
-	prefix = filepath.Join(bu.prefix, prefix)
-	if !strings.HasSuffix(prefix, "/") {
-		prefix += "/"
-	}
-	var bucket *blob.Bucket
-	if bu.bucket != nil {
-		bucket = blob.PrefixedBucket(bu.bucket, prefix)
-	}
-	return &Bucket{
-		prefix: prefix,
-		bucket: bucket,
-		cache:  bu.cache,
-	}
 }
 
 func (bu *Bucket) Close() {
@@ -162,66 +133,18 @@ func (bu *Bucket) Close() {
 	}
 }
 
-func (bu *Bucket) Exists(ctx context.Context, key string) (ok bool, err error) {
-	start := time.Now()
-	source := "remote"
-	defer func() {
-		if err != nil {
-			return
-		}
-		log.Debug().
-			Bool("exists", ok).
-			Stringer("dur", time.Since(start).Round(time.Microsecond)).
-			Str("source", source).
-			Msg("bucket exists")
-	}()
-	key += ".zst"
-	exists := false
-	if bu.cache != nil {
-		err := bu.cache.View(func(txn *badger.Txn) error {
-			_, err := txn.Get(bu.cacheKey(key))
-			if err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
-				return err
-			}
-			if !errors.Is(err, badger.ErrKeyNotFound) {
-				exists = true
-			}
-			return nil
-		})
-		if err != nil {
-			log.Err(err).Msg("failed to check cache for existence")
-		}
-	}
-	if exists {
-		source = "cache"
-		return exists, nil
-	}
-	if bu.bucket != nil {
-		return bu.bucket.Exists(ctx, key)
-	}
-	return false, nil
-}
-
-type WriteOption interface {
-	writeOption()
-}
-
-type OptWriteCacheTTL struct {
-	TTL time.Duration
-}
-
-func (o *OptWriteCacheTTL) writeOption() {}
-
-func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte, opts ...WriteOption) error {
+func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte) error {
 	key += ".zst"
 	if bu.bucket != nil {
-		var opts *blob.WriterOptions
-		w, err := bu.bucket.NewWriter(ctx, key, opts)
+		w, err := bu.bucket.NewWriter(ctx, key, nil)
 		if err != nil {
 			return fmt.Errorf("failed to create bucket writer: %w", err)
 		}
-		var _ io.Writer
-		zw := zstd.NewWriter(w)
+		zw, err := zstd.NewWriter(w)
+		if err != nil {
+			_ = w.Close()
+			return fmt.Errorf("failed to create zstd writer: %w", err)
+		}
 		n, err := zw.Write(data)
 		if err != nil {
 			_ = zw.Close()
@@ -242,7 +165,10 @@ func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte, opts ...
 	}
 	if bu.cache != nil {
 		err := bu.cache.Update(func(txn *badger.Txn) error {
-			entry := bu.newEntry(key, data, opts)
+			entry := badger.NewEntry(bu.cacheKey(key), data).WithDiscard()
+			if bu.cacheTTL > 0 {
+				entry.WithTTL(bu.cacheTTL)
+			}
 			return txn.SetEntry(entry)
 		})
 		if err != nil {
@@ -250,25 +176,6 @@ func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte, opts ...
 		}
 	}
 	return nil
-}
-
-func (bu *Bucket) newEntry(
-	key string,
-	data []byte,
-	opts []WriteOption,
-) *badger.Entry {
-	ttl := defaultCacheTTL
-	for _, opt := range opts {
-		switch opt := opt.(type) {
-		case *OptWriteCacheTTL:
-			ttl = opt.TTL
-		}
-	}
-	entry := badger.NewEntry(bu.cacheKey(key), data).WithDiscard()
-	if ttl > 0 {
-		entry.WithTTL(ttl)
-	}
-	return entry
 }
 
 // NotFoundError is returned when a key is not found in the bucket.
@@ -281,7 +188,6 @@ func (e *NotFoundError) Error() string {
 }
 
 type Blob struct {
-	Key    string
 	Data   []byte
 	Source string
 }
@@ -321,7 +227,7 @@ func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) 
 			}
 			return nil
 		})
-		if err != nil && !errors.As(err, lo.ToPtr(&NotFoundError{})) {
+		if err != nil && !errors.As(err, toPtr(&NotFoundError{})) {
 			if bu.bucket == nil {
 				return nil, fmt.Errorf("failed to read cache: %w", err)
 			}
@@ -333,30 +239,34 @@ func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) 
 	}
 
 	if bu.bucket != nil {
-		var opts *blob.ReaderOptions
-		r, err := bu.bucket.NewReader(ctx, key, opts)
+		r, err := bu.bucket.NewReader(ctx, key, nil)
 		if err != nil {
 			if gcerrors.Code(err) == gcerrors.NotFound {
 				return nil, &NotFoundError{key}
 			}
 			return nil, fmt.Errorf("failed to create bucket reader: %w", err)
 		}
-		zr := zstd.NewReader(r)
+		zr, err := zstd.NewReader(r)
+		if err != nil {
+			_ = r.Close()
+			return nil, fmt.Errorf("failed to create zstd reader: %w", err)
+		}
 		data, err := io.ReadAll(zr)
 		if err != nil {
-			_ = zr.Close()
+			zr.Close()
 			_ = r.Close()
 			return nil, err
 		}
-		if err := zr.Close(); err != nil {
-			return nil, fmt.Errorf("failed to close zstd reader: %w", err)
-		}
+		zr.Close()
 		if err := r.Close(); err != nil {
 			return nil, fmt.Errorf("failed to close bucket reader: %w", err)
 		}
 		if cacheData == nil && bu.cache != nil {
 			err := bu.cache.Update(func(txn *badger.Txn) error {
-				entry := bu.newEntry(key, data, nil)
+				entry := badger.NewEntry(bu.cacheKey(key), data).WithDiscard()
+				if bu.cacheTTL > 0 {
+					entry.WithTTL(bu.cacheTTL)
+				}
 				return txn.SetEntry(entry)
 			})
 			if err != nil {
@@ -364,79 +274,12 @@ func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) 
 			}
 		}
 		return &Blob{
-			Key:    key,
 			Data:   data,
 			Source: "remote",
 		}, nil
 	}
 
 	return nil, &NotFoundError{Key: key}
-}
-
-func (bu *Bucket) List(options ...ListOption) *ListIterator {
-	prefix := mo.None[string]()
-	for _, opt := range options {
-		switch opt := opt.(type) {
-		case *OptListPrefix:
-			prefix = mo.Some(opt.Prefix)
-		default:
-			panic(fmt.Sprintf("invalid option type %T", opt))
-		}
-	}
-	// FIXME need support for cache-only
-	it := bu.bucket.List(&blob.ListOptions{
-		Prefix: prefix.OrElse(""),
-	})
-	return &ListIterator{
-		b:    bu,
-		it:   it,
-		obj:  nil,
-		err:  nil,
-		done: false,
-	}
-}
-
-type ListOption interface {
-	listOption()
-}
-
-type OptListPrefix struct {
-	Prefix string
-}
-
-func (o *OptListPrefix) listOption() {}
-
-type ListIterator struct {
-	b    *Bucket
-	it   *blob.ListIterator
-	obj  *blob.ListObject
-	err  error
-	done bool
-}
-
-func (it *ListIterator) Next(ctx context.Context) bool {
-	if it.done {
-		return false
-	}
-	obj, err := it.it.Next(ctx)
-	if errors.Is(err, io.EOF) {
-		it.done = true
-		return false
-	}
-	it.obj = obj
-	return true
-}
-
-func (it *ListIterator) Err() error {
-	return it.err
-}
-
-func (it *ListIterator) Key() string {
-	return strings.TrimSuffix(it.obj.Key, ".zst")
-}
-
-func (it *ListIterator) Value(ctx context.Context) (*Blob, error) {
-	return it.b.GetBlob(ctx, it.Key())
 }
 
 func (bu *Bucket) cacheKey(key string) []byte {
@@ -466,17 +309,15 @@ func (l badgerLogger) Warningf(format string, args ...any) {
 	l.log(zerolog.WarnLevel, format, args)
 }
 
-// lower by 1, as these logs can be noisy
 func (l badgerLogger) Infof(format string, args ...any) {
 	l.log(zerolog.DebugLevel, format, args)
 }
 
-// lower by 1, as these logs can be noisy
 func (l badgerLogger) Debugf(format string, args ...any) {
 	l.log(zerolog.TraceLevel, format, args)
 }
 
 func (l badgerLogger) log(lvl zerolog.Level, format string, args []any) {
-	format = strings.TrimSpace(format) // some log messages misbehave
+	format = strings.TrimSpace(format)
 	l.Logger.WithLevel(lvl).Msgf(format, args...)
 }
