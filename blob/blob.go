@@ -31,7 +31,6 @@ type BucketConfig struct {
 }
 
 type Bucket struct {
-	prefix   string
 	bucket   *blob.Bucket
 	cache    *badger.DB
 	cacheTTL time.Duration
@@ -73,7 +72,6 @@ func NewBucket(
 		return nil, err
 	}
 	return &Bucket{
-		prefix:   "",
 		bucket:   bucket,
 		cache:    cache,
 		cacheTTL: cacheTTL,
@@ -302,15 +300,15 @@ func (bu *Bucket) ListCache(prefix string) ([]CacheEntry, error) {
 		it := txn.NewIterator(opts)
 		defer it.Close()
 
-		pfx := []byte(bu.prefix + prefix)
+		pfx := []byte(prefix)
 		for it.Seek(pfx); it.Valid(); it.Next() {
 			item := it.Item()
 			key := string(item.Key())
-			if prefix != "" && !strings.HasPrefix(key, bu.prefix+prefix) {
+			if prefix != "" && !strings.HasPrefix(key, prefix) {
 				break
 			}
 			// Strip .zst suffix so callers can pass keys to GetBlob without double-suffixing.
-			cleanKey := strings.TrimSuffix(strings.TrimPrefix(key, bu.prefix), ".zst")
+			cleanKey := strings.TrimSuffix(key, ".zst")
 			entries = append(entries, CacheEntry{
 				Key:       cleanKey,
 				Size:      item.ValueSize(),
@@ -323,7 +321,7 @@ func (bu *Bucket) ListCache(prefix string) ([]CacheEntry, error) {
 }
 
 func (bu *Bucket) cacheKey(key string) []byte {
-	return []byte(bu.prefix + key)
+	return []byte(key)
 }
 
 var _ badger.Logger = (*badgerLogger)(nil)

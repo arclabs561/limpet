@@ -71,12 +71,6 @@ func init() {
 		"auto",
 		"logging color",
 	)
-	rootCmd.PersistentFlags().BoolP(
-		"log-color-always",
-		"C",
-		false,
-		"whether to always log with color",
-	)
 
 	rootCmd.AddCommand(doCmd)
 	rootCmd.AddCommand(proxyCmd)
@@ -96,9 +90,6 @@ func setupLogger(cmd *cobra.Command, args []string) context.Context {
 	}
 	logFormat := mustFlagString(cmd, "log-format")
 	logColor := mustFlagString(cmd, "log-color")
-	if mustFlagBool(cmd, "log-color-always") {
-		logColor = "always"
-	}
 	ctx := cmd.Context()
 	opts := loggerOptions{
 		Level:  logLevel,
@@ -179,7 +170,7 @@ func newBucket(cmd *cobra.Command) (*blob.Bucket, error) {
 	})
 }
 
-func newClient(cmd *cobra.Command, args []string) (*limpet.Client, error) {
+func newClient(cmd *cobra.Command) (*limpet.Client, error) {
 	bucket, err := newBucket(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bucket: %w", err)
