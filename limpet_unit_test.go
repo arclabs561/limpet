@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 )
 
 func TestParseRateLimit(t *testing.T) {
@@ -131,6 +132,49 @@ func TestBlobKey(t *testing.T) {
 		}
 		if string(reqBody) != "hello" {
 			t.Errorf("reqBody = %q, want %q", reqBody, "hello")
+		}
+	})
+}
+
+func TestArchiveKey(t *testing.T) {
+	ts := time.Date(2026, 3, 16, 21, 30, 45, 0, time.UTC)
+
+	t.Run("format", func(t *testing.T) {
+		key := archiveKey("example.com/abc123.json", ts)
+		want := "example.com/abc123@20260316T213045.000Z.json"
+		if key != want {
+			t.Errorf("archiveKey = %q, want %q", key, want)
+		}
+	})
+
+	t.Run("prefix", func(t *testing.T) {
+		pfx := archivePrefix("example.com/abc123.json")
+		want := "example.com/abc123@"
+		if pfx != want {
+			t.Errorf("archivePrefix = %q, want %q", pfx, want)
+		}
+	})
+}
+
+func TestDiff(t *testing.T) {
+	t.Run("identical pages", func(t *testing.T) {
+		a := &Page{Response: PageResponse{Body: []byte("hello")}}
+		b := &Page{Response: PageResponse{Body: []byte("hello")}}
+		d := Diff(a, b)
+		if d.Changed {
+			t.Error("expected Changed=false for identical bodies")
+		}
+	})
+
+	t.Run("different pages", func(t *testing.T) {
+		a := &Page{Response: PageResponse{Body: []byte("hello")}}
+		b := &Page{Response: PageResponse{Body: []byte("world")}}
+		d := Diff(a, b)
+		if !d.Changed {
+			t.Error("expected Changed=true for different bodies")
+		}
+		if d.OldSize != 5 || d.NewSize != 5 {
+			t.Errorf("sizes = %d/%d, want 5/5", d.OldSize, d.NewSize)
 		}
 	})
 }
