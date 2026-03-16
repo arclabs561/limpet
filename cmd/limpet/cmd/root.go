@@ -80,6 +80,7 @@ func init() {
 
 	rootCmd.AddCommand(doCmd)
 	rootCmd.AddCommand(proxyCmd)
+	rootCmd.AddCommand(cacheCmd)
 }
 
 type loggerOptions struct {
@@ -153,7 +154,7 @@ func initLogger(ctx context.Context, opts loggerOptions) (context.Context, zerol
 	return lg.WithContext(ctx), lg
 }
 
-func newClient(cmd *cobra.Command, args []string) (*limpet.Client, error) {
+func newBucket(cmd *cobra.Command) (*blob.Bucket, error) {
 	ctx := cmd.Context()
 	bucketURL := mustFlagString(cmd, "bucket-url")
 	cacheDir := mustFlagString(cmd, "cache-dir")
@@ -171,20 +172,24 @@ func newClient(cmd *cobra.Command, args []string) (*limpet.Client, error) {
 		}
 	}
 
-	cfg := &blob.BucketConfig{
+	return blob.NewBucket(ctx, bucketURL, &blob.BucketConfig{
 		CacheDir: cacheDir,
 		NoCache:  noCache,
 		CacheTTL: cacheTTL,
-	}
-	bucket, err := blob.NewBucket(ctx, bucketURL, cfg)
+	})
+}
+
+func newClient(cmd *cobra.Command, args []string) (*limpet.Client, error) {
+	bucket, err := newBucket(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bucket: %w", err)
 	}
-	sc, err := limpet.NewClient(ctx, bucket)
+	ctx := cmd.Context()
+	cl, err := limpet.NewClient(ctx, bucket)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client: %w", err)
 	}
-	return sc, nil
+	return cl, nil
 }
 
 const appName = "limpet"

@@ -282,6 +282,44 @@ func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) 
 	return nil, &NotFoundError{Key: key}
 }
 
+// CacheEntry represents a cached blob key with optional metadata.
+type CacheEntry struct {
+	Key       string
+	Size      int64
+	ExpiresAt uint64 // Unix timestamp, 0 means no expiry
+}
+
+// ListCache iterates all keys in the local badger cache.
+// Returns nil if cache is disabled.
+func (bu *Bucket) ListCache(prefix string) ([]CacheEntry, error) {
+	if bu.cache == nil {
+		return nil, nil
+	}
+	var entries []CacheEntry
+	err := bu.cache.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		pfx := []byte(bu.prefix + prefix)
+		for it.Seek(pfx); it.Valid(); it.Next() {
+			item := it.Item()
+			key := string(item.Key())
+			if prefix != "" && !strings.HasPrefix(key, bu.prefix+prefix) {
+				break
+			}
+			entries = append(entries, CacheEntry{
+				Key:       strings.TrimPrefix(key, bu.prefix),
+				Size:      item.ValueSize(),
+				ExpiresAt: item.ExpiresAt(),
+			})
+		}
+		return nil
+	})
+	return entries, err
+}
+
 func (bu *Bucket) cacheKey(key string) []byte {
 	return []byte(bu.prefix + key)
 }
