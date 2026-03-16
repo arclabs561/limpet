@@ -490,7 +490,7 @@ func (c *Client) fetchBrowser(
 			URL:           req.URL.String(),
 			RedirectedURL: resp.URL(),
 			Method:        req.Method,
-			Header:        header,
+			Header:        req.Header,
 			Body:          reqBody,
 		},
 		Response: PageResponse{

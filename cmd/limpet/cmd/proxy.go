@@ -134,6 +134,13 @@ func (s *proxyTarget) handleConnect(downstream net.Conn, req *http.Request) {
 	if _, _, err := net.SplitHostPort(host); err != nil {
 		host = net.JoinHostPort(host, "443")
 	}
+
+	if err := validateConnectHost(host); err != nil {
+		log.Warn().Err(err).Str("host", host).Msg("CONNECT blocked")
+		writeHTTPError(downstream, http.StatusForbidden, err)
+		return
+	}
+
 	log.Debug().Str("host", host).Msg("CONNECT tunnel")
 
 	upstream, err := net.DialTimeout("tcp", host, 10*time.Second)
@@ -167,4 +174,23 @@ func (s *proxyTarget) handleConnect(downstream net.Conn, req *http.Request) {
 	go relay(upstream, downstream)
 	go relay(downstream, upstream)
 	wg.Wait()
+}
+
+// validateConnectHost blocks CONNECT tunnels to loopback, private (RFC 1918),
+// and link-local addresses to prevent SSRF via the proxy.
+func validateConnectHost(hostport string) error {
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return fmt.Errorf("invalid host: %w", err)
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("DNS lookup failed: %w", err)
+	}
+	for _, ip := range ips {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("CONNECT to %s (%s) blocked: private/loopback address", host, ip)
+		}
+	}
+	return nil
 }
