@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -310,15 +311,6 @@ func (c *Client) fetchHTTP(
 		if c.respBodyLimit > 0 {
 			rdr = http.MaxBytesReader(nil, resp.Body, c.respBodyLimit)
 		}
-		if resp.Uncompressed {
-			resp.Header.Add("X-Uncompressed-Content", "true")
-			originalContentEncoding := resp.Header.Get("Content-Encoding")
-			if originalContentEncoding != "" {
-				resp.Header.Add("X-Original-Content-Encoding", originalContentEncoding)
-			}
-		} else {
-			resp.Header.Add("X-Uncompressed-Content", "false")
-		}
 		body, err = io.ReadAll(rdr)
 		resp.Body.Close()
 		lastAttempt := i >= attemptsMax-1
@@ -388,14 +380,22 @@ func (c *Client) fetchBrowser(
 	reqBody []byte,
 	opts doOptions,
 ) (*Page, error) {
-	if c.browser == nil {
+	// Hold the mutex while checking/starting the browser to avoid a data race
+	// with closeBrowser (which also writes c.browser under mu).
+	c.mu.Lock()
+	needStart := c.browser == nil
+	c.mu.Unlock()
+	if needStart {
 		if err := c.startBrowser(); err != nil {
 			return nil, fmt.Errorf("failed to start browser: %w", err)
 		}
 	}
-	if !c.browser.IsConnected() {
+	c.mu.Lock()
+	if c.browser == nil || !c.browser.IsConnected() {
+		c.mu.Unlock()
 		return nil, fmt.Errorf("browser is not connected")
 	}
+	c.mu.Unlock()
 	if req.Method != "GET" {
 		return nil, fmt.Errorf("browser only supports requests with GET method")
 	}
@@ -585,8 +585,21 @@ func blobKey(req *http.Request, bodyLimit int64) (string, []byte, error) {
 	buf.WriteString(".")
 	buf.WriteString(req.Method)
 	buf.WriteString(".")
-	if err := req.Header.WriteSubset(&buf, nil); err != nil {
-		return "", nil, err
+	// Sort header keys for deterministic cache keys. http.Header is a map
+	// with non-deterministic iteration order; WriteSubset would produce
+	// different hashes for identical headers.
+	keys := make([]string, 0, len(req.Header))
+	for k := range req.Header {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		for _, v := range req.Header[k] {
+			buf.WriteString(k)
+			buf.WriteString(": ")
+			buf.WriteString(v)
+			buf.WriteString("\r\n")
+		}
 	}
 	buf.WriteString(".")
 	body, err := peekRequestBody(req, bodyLimit)

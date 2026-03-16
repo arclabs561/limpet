@@ -57,7 +57,7 @@ func init() {
 
 func doRunE(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	sc, err := newClient(cmd, args)
+	cl, err := newClient(cmd, args)
 	if err != nil {
 		return fmt.Errorf("failed to create client: %w", err)
 	}
@@ -80,7 +80,7 @@ func doRunE(cmd *cobra.Command, args []string) error {
 		opts = append(opts, &limpet.OptDoReplace{})
 	}
 	log.Info().Interface("opts", opts).Msgf("fetching %s", args[0])
-	page, err := sc.Do(ctx, req, opts...)
+	page, err := cl.Do(ctx, req, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to fetch: %w", err)
 	}

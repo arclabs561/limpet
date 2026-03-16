@@ -309,8 +309,10 @@ func (bu *Bucket) ListCache(prefix string) ([]CacheEntry, error) {
 			if prefix != "" && !strings.HasPrefix(key, bu.prefix+prefix) {
 				break
 			}
+			// Strip .zst suffix so callers can pass keys to GetBlob without double-suffixing.
+			cleanKey := strings.TrimSuffix(strings.TrimPrefix(key, bu.prefix), ".zst")
 			entries = append(entries, CacheEntry{
-				Key:       strings.TrimPrefix(key, bu.prefix),
+				Key:       cleanKey,
 				Size:      item.ValueSize(),
 				ExpiresAt: item.ExpiresAt(),
 			})
