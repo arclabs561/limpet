@@ -781,6 +781,44 @@ type Page struct {
 	Response PageResponse `json:"response"`
 }
 
+// Stale reports whether this cached page is stale according to HTTP cache
+// semantics (Cache-Control max-age, Expires header). Returns false if the
+// response has no cache directives (treat as fresh). This is informational --
+// the caller decides whether to re-fetch.
+func (p *Page) Stale() bool {
+	if p.Meta.FetchedAt.IsZero() {
+		return true
+	}
+	age := time.Since(p.Meta.FetchedAt)
+
+	// Check Cache-Control: max-age=N
+	cc := p.Response.Header.Get("Cache-Control")
+	if cc != "" {
+		for _, directive := range strings.Split(cc, ",") {
+			directive = strings.TrimSpace(directive)
+			if strings.EqualFold(directive, "no-cache") || strings.EqualFold(directive, "no-store") {
+				return true
+			}
+			if strings.HasPrefix(strings.ToLower(directive), "max-age=") {
+				secs, err := strconv.Atoi(strings.TrimPrefix(strings.ToLower(directive), "max-age="))
+				if err == nil {
+					return age > time.Duration(secs)*time.Second
+				}
+			}
+		}
+	}
+
+	// Check Expires header.
+	if expires := p.Response.Header.Get("Expires"); expires != "" {
+		t, err := http.ParseTime(expires)
+		if err == nil {
+			return time.Now().After(t)
+		}
+	}
+
+	return false
+}
+
 // HTTPResponse reconstructs a standard *http.Response from the cached page.
 func (p *Page) HTTPResponse() *http.Response {
 	return &http.Response{
