@@ -94,7 +94,7 @@ func TestDoBrowser(t *testing.T) {
 		t.Fatalf("failed to create request: %v", err)
 	}
 
-	page, err := ts.client.Do(ts.ctx, req, &limpet.OptDoBrowser{})
+	page, err := ts.client.Do(ts.ctx, req, limpet.DoConfig{Browser: true})
 	if err != nil {
 		t.Fatalf("failed to do request: %v", err)
 	}

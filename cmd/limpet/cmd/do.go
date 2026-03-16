@@ -73,15 +73,12 @@ func doRunE(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
-	var opts []limpet.DoOption
-	if browser {
-		opts = append(opts, &limpet.OptDoBrowser{})
+	cfg := limpet.DoConfig{
+		Browser: browser,
+		Replace: forceRefetch,
 	}
-	if forceRefetch {
-		opts = append(opts, &limpet.OptDoReplace{})
-	}
-	log.Info().Interface("opts", opts).Msgf("fetching %s", args[0])
-	page, err := cl.Do(ctx, req, opts...)
+	log.Info().Interface("cfg", cfg).Msgf("fetching %s", args[0])
+	page, err := cl.Do(ctx, req, cfg)
 	if err != nil {
 		// Non-200 responses come back as FetchStatusNotOKError with the page.
 		var notOK *limpet.FetchStatusNotOKError
