@@ -179,6 +179,82 @@ func TestDiff(t *testing.T) {
 	})
 }
 
+func TestPageStale(t *testing.T) {
+	t.Run("no headers means fresh", func(t *testing.T) {
+		p := &Page{
+			Meta:     PageMeta{FetchedAt: time.Now()},
+			Response: PageResponse{Header: make(http.Header)},
+		}
+		if p.Stale() {
+			t.Error("expected fresh when no cache headers")
+		}
+	})
+
+	t.Run("max-age not expired", func(t *testing.T) {
+		p := &Page{
+			Meta:     PageMeta{FetchedAt: time.Now()},
+			Response: PageResponse{Header: http.Header{"Cache-Control": {"max-age=3600"}}},
+		}
+		if p.Stale() {
+			t.Error("expected fresh within max-age")
+		}
+	})
+
+	t.Run("max-age expired", func(t *testing.T) {
+		p := &Page{
+			Meta:     PageMeta{FetchedAt: time.Now().Add(-2 * time.Hour)},
+			Response: PageResponse{Header: http.Header{"Cache-Control": {"max-age=3600"}}},
+		}
+		if !p.Stale() {
+			t.Error("expected stale past max-age")
+		}
+	})
+
+	t.Run("no-cache is stale", func(t *testing.T) {
+		p := &Page{
+			Meta:     PageMeta{FetchedAt: time.Now()},
+			Response: PageResponse{Header: http.Header{"Cache-Control": {"no-cache"}}},
+		}
+		if !p.Stale() {
+			t.Error("expected stale with no-cache")
+		}
+	})
+
+	t.Run("no-store is stale", func(t *testing.T) {
+		p := &Page{
+			Meta:     PageMeta{FetchedAt: time.Now()},
+			Response: PageResponse{Header: http.Header{"Cache-Control": {"no-store"}}},
+		}
+		if !p.Stale() {
+			t.Error("expected stale with no-store")
+		}
+	})
+
+	t.Run("expires in future", func(t *testing.T) {
+		p := &Page{
+			Meta: PageMeta{FetchedAt: time.Now()},
+			Response: PageResponse{Header: http.Header{
+				"Expires": {time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)},
+			}},
+		}
+		if p.Stale() {
+			t.Error("expected fresh before Expires")
+		}
+	})
+
+	t.Run("expires in past", func(t *testing.T) {
+		p := &Page{
+			Meta: PageMeta{FetchedAt: time.Now()},
+			Response: PageResponse{Header: http.Header{
+				"Expires": {time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)},
+			}},
+		}
+		if !p.Stale() {
+			t.Error("expected stale after Expires")
+		}
+	})
+}
+
 func TestErrPageStatusNotOK(t *testing.T) {
 	t.Run("200 returns nil", func(t *testing.T) {
 		page := &Page{Response: PageResponse{StatusCode: 200}}
