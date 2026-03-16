@@ -30,6 +30,7 @@ type BucketConfig struct {
 	CacheTTL time.Duration // 0 means use default (24h), negative means no expiry
 }
 
+// Bucket provides two-tier blob storage (remote + local badger cache).
 type Bucket struct {
 	bucket   *blob.Bucket
 	cache    *badger.DB
@@ -117,6 +118,7 @@ func newBucket(
 	return bucket, nil
 }
 
+// Close shuts down the local cache and remote bucket.
 func (bu *Bucket) Close() {
 	if bu.cache != nil {
 		if err := bu.cache.Close(); err != nil {
@@ -130,6 +132,7 @@ func (bu *Bucket) Close() {
 	}
 }
 
+// SetBlob writes data to the remote bucket and local cache under the given key.
 func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte) error {
 	key += ".zst"
 	if bu.bucket != nil {
@@ -184,11 +187,13 @@ func (e *NotFoundError) Error() string {
 	return fmt.Sprintf("key not found: %s", e.Key)
 }
 
+// Blob holds decompressed data and its source ("cache" or "remote").
 type Blob struct {
 	Data   []byte
 	Source string
 }
 
+// GetBlob reads data by key, checking the local cache first, then the remote bucket.
 func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) {
 	if bu.cache == nil && bu.bucket == nil {
 		return nil, errors.New("neither cache nor external bucket is configured")
