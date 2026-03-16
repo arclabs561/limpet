@@ -19,7 +19,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-func TestScraperLiveDoTwice(t *testing.T) {
+func TestLiveDoTwice(t *testing.T) {
 	ts := setup(t)
 	setLive(t)
 	req, err := http.NewRequest("GET", "https://httpbin.org/anything", nil)
@@ -29,7 +29,7 @@ func TestScraperLiveDoTwice(t *testing.T) {
 
 	// First request should hit live web, without browser automation as we
 	// didn't request it.
-	page, err := ts.scraper.Do(ts.ctx, req)
+	page, err := ts.client.Do(ts.ctx, req)
 	if err != nil {
 		t.Fatalf("failed to do request: %v", err)
 	}
@@ -40,11 +40,11 @@ func TestScraperLiveDoTwice(t *testing.T) {
 		t.Errorf("response body is empty")
 	}
 	if page.Meta.Source != "http.plain" {
-		t.Errorf("expected source to be not http.plain, got: %v", page.Meta.Source)
+		t.Errorf("expected source http.plain, got: %v", page.Meta.Source)
 	}
 
 	// Second request should hit cache.
-	page, err = ts.scraper.Do(ts.ctx, req)
+	page, err = ts.client.Do(ts.ctx, req)
 	if err != nil {
 		t.Fatalf("failed to do request: %v", err)
 	}
@@ -55,11 +55,11 @@ func TestScraperLiveDoTwice(t *testing.T) {
 		t.Errorf("response body is empty")
 	}
 	if page.Meta.Source != "cache" {
-		t.Errorf("expected source to be not cache, got: %v", page.Meta.Source)
+		t.Errorf("expected source cache, got: %v", page.Meta.Source)
 	}
 }
 
-func TestScraperDoBrowser(t *testing.T) {
+func TestDoBrowser(t *testing.T) {
 	ts := setup(t)
 
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -94,7 +94,7 @@ func TestScraperDoBrowser(t *testing.T) {
 		t.Fatalf("failed to create request: %v", err)
 	}
 
-	page, err := ts.scraper.Do(ts.ctx, req, &limpet.OptDoBrowser{})
+	page, err := ts.client.Do(ts.ctx, req, &limpet.OptDoBrowser{})
 	if err != nil {
 		t.Fatalf("failed to do request: %v", err)
 	}
@@ -102,13 +102,13 @@ func TestScraperDoBrowser(t *testing.T) {
 		t.Errorf("request method %q != GET", page.Request.Method)
 	}
 	if page.Meta.Source != "http.browser" {
-		t.Errorf("expected source to be not http.plain, got: %v", page.Meta.Source)
+		t.Errorf("expected source http.browser, got: %v", page.Meta.Source)
 	}
 	if strings.Contains(string(page.Response.Body), `<div id="content">Initial content</div>`) {
-		t.Errorf("response body did not contain rendered content: %v", string(page.Response.Body))
+		t.Errorf("response body should not contain initial content (JS should have replaced it)")
 	}
 	if !strings.Contains(string(page.Response.Body), `<div id="content">This is JavaScript-rendered content!</div>`) {
-		t.Errorf("response body did not contain rendered content: %v", string(page.Response.Body))
+		t.Errorf("response body missing JS-rendered content: %v", string(page.Response.Body))
 	}
 }
 
@@ -128,9 +128,9 @@ func setLive(t *testing.T) {
 }
 
 type testState struct {
-	ctx     context.Context
-	bucket  *blob.Bucket
-	scraper *limpet.Scraper
+	ctx    context.Context
+	bucket *blob.Bucket
+	client *limpet.Client
 }
 
 func setup(t *testing.T) testState {
@@ -155,16 +155,16 @@ func setup(t *testing.T) testState {
 	}
 	t.Cleanup(func() { bucket.Close() })
 
-	sc, err := limpet.NewScraper(ctx, bucket)
+	cl, err := limpet.NewClient(ctx, bucket)
 	if err != nil {
-		t.Fatalf("failed to create scraper: %v", err)
+		t.Fatalf("failed to create client: %v", err)
 	}
-	t.Cleanup(sc.Close)
+	t.Cleanup(cl.Close)
 
 	return testState{
-		ctx:     ctx,
-		bucket:  bucket,
-		scraper: sc,
+		ctx:    ctx,
+		bucket: bucket,
+		client: cl,
 	}
 }
 

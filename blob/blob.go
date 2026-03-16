@@ -37,8 +37,7 @@ type Bucket struct {
 	cacheTTL time.Duration
 }
 
-func toPtr[T any](v T) *T { return &v }
-
+// NewBucket creates a Bucket backed by the given URL (file:// or s3://).
 func NewBucket(
 	ctx context.Context,
 	bucketURL string,
@@ -227,7 +226,8 @@ func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) 
 			}
 			return nil
 		})
-		if err != nil && !errors.As(err, toPtr(&NotFoundError{})) {
+		var notFound *NotFoundError
+		if err != nil && !errors.As(err, &notFound) {
 			if bu.bucket == nil {
 				return nil, fmt.Errorf("failed to read cache: %w", err)
 			}

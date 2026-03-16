@@ -32,8 +32,6 @@ import (
 
 var reNumericPrefix = regexp.MustCompile(`^\d+`)
 
-func toPtr[T any](v T) *T { return &v }
-
 // parseRateLimit parses a rate limit string like "100", "10/1m", or "none".
 func parseRateLimit(raw string) (ratelimit.Limiter, error) {
 	switch strings.ToLower(raw) {
@@ -60,7 +58,8 @@ func parseRateLimit(raw string) (ratelimit.Limiter, error) {
 	return ratelimit.New(int(rate), opts...), nil
 }
 
-type Scraper struct {
+// Client fetches web pages with automatic caching and request deduplication.
+type Client struct {
 	httpClient       *retryablehttp.Client
 	bucket           *blob.Bucket
 	mu               *sync.Mutex
@@ -75,27 +74,28 @@ type Scraper struct {
 	requests         atomic.Uint64
 }
 
-// Option configures a Scraper at construction time.
-type Option func(*Scraper)
+// Option configures a Client at construction time.
+type Option func(*Client)
 
-// OptAlwaysBrowser configures the scraper to always use headless browser.
+// OptAlwaysBrowser configures the client to always use headless browser.
 func OptAlwaysBrowser() Option {
-	return func(s *Scraper) { s.alwaysDoBrowser = true }
+	return func(c *Client) { c.alwaysDoBrowser = true }
 }
 
 // OptRateLimit sets a programmatic rate limit, overriding the env var.
 func OptRateLimit(rps int, opts ...ratelimit.Option) Option {
-	return func(s *Scraper) {
-		s.rateLimit = ratelimit.New(rps, opts...)
+	return func(c *Client) {
+		c.rateLimit = ratelimit.New(rps, opts...)
 	}
 }
 
-func NewScraper(
+// NewClient creates a new Client with the given blob bucket and options.
+func NewClient(
 	ctx context.Context,
 	bucket *blob.Bucket,
 	opts ...Option,
-) (*Scraper, error) {
-	s := &Scraper{
+) (*Client, error) {
+	c := &Client{
 		bucket:           bucket,
 		mu:               new(sync.Mutex),
 		requestBodyLimit: 10e6,  // 10 MB
@@ -110,11 +110,11 @@ func NewScraper(
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse LIMPET_RATE_LIMIT=%q: %w", raw, err)
 		}
-		s.rateLimit = lim
+		c.rateLimit = lim
 	}
 
 	for _, opt := range opts {
-		opt(s)
+		opt(c)
 	}
 
 	httpClient := retryablehttp.NewClient()
@@ -125,34 +125,34 @@ func NewScraper(
 		if ok {
 			val.Limiter.Take()
 		} else {
-			s.rateLimit.Take()
+			c.rateLimit.Take()
 		}
-		s.requests.Add(1)
+		c.requests.Add(1)
 	}
-	s.httpClient = httpClient
-	s.startBrowser = sync.OnceValue(s.newBrowser)
+	c.httpClient = httpClient
+	c.startBrowser = sync.OnceValue(c.newBrowser)
 
-	if s.alwaysDoBrowser {
-		if err := s.startBrowser(); err != nil {
+	if c.alwaysDoBrowser {
+		if err := c.startBrowser(); err != nil {
 			return nil, err
 		}
 	}
-	return s, nil
+	return c, nil
 }
 
-func (s *Scraper) Close() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.closeBrowser()
+func (c *Client) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closeBrowser()
 }
 
 // Get is a convenience method for fetching a URL with GET.
-func (s *Scraper) Get(ctx context.Context, url string, opts ...DoOption) (*Page, error) {
+func (c *Client) Get(ctx context.Context, url string, opts ...DoOption) (*Page, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	return s.Do(ctx, req, opts...)
+	return c.Do(ctx, req, opts...)
 }
 
 // FetchStatusNotOKError is returned when the fetch status is not 200 OK. The
@@ -179,7 +179,7 @@ func (e *FetchThrottledError) Error() string {
 	return "fetch throttled"
 }
 
-func (s *Scraper) Do(
+func (c *Client) Do(
 	ctx context.Context,
 	req *http.Request,
 	options ...DoOption,
@@ -198,18 +198,18 @@ func (s *Scraper) Do(
 			browser = true
 		}
 	}
-	fn := s.fetchHTTP
+	fn := c.fetchHTTP
 	if browser {
-		fn = s.fetchBrowser
+		fn = c.fetchBrowser
 	}
-	return s.do(ctx, req, opts, fn)
+	return c.do(ctx, req, opts, fn)
 }
 
-func (s *Scraper) newBrowser() (err error) {
+func (c *Client) newBrowser() (err error) {
 	start := time.Now()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	log.Debug().Msg("starting playwright instance")
 	pw, err := playwright.Run(&playwright.RunOptions{
@@ -218,7 +218,7 @@ func (s *Scraper) newBrowser() (err error) {
 	if err != nil {
 		return fmt.Errorf("failed to run playwright instance: %w", err)
 	}
-	s.pw = pw
+	c.pw = pw
 	log.Debug().Msg("launching headless chromium browser")
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		Headless:        playwright.Bool(true),
@@ -230,7 +230,7 @@ func (s *Scraper) newBrowser() (err error) {
 	if !browser.IsConnected() {
 		return fmt.Errorf("browser is not connected")
 	}
-	s.browser = browser
+	c.browser = browser
 
 	log.Debug().
 		Stringer("dur", time.Since(start).Round(time.Microsecond)).
@@ -238,18 +238,18 @@ func (s *Scraper) newBrowser() (err error) {
 	return nil
 }
 
-func (s *Scraper) closeBrowser() {
-	if s.browser != nil {
-		if err := s.browser.Close(); err != nil {
+func (c *Client) closeBrowser() {
+	if c.browser != nil {
+		if err := c.browser.Close(); err != nil {
 			log.Err(err).Msg("failed to close browser")
 		}
-		s.browser = nil
+		c.browser = nil
 	}
-	if s.pw != nil {
-		if err := s.pw.Stop(); err != nil {
+	if c.pw != nil {
+		if err := c.pw.Stop(); err != nil {
 			log.Err(err).Msg("failed to close playwright instance")
 		}
-		s.pw = nil
+		c.pw = nil
 	}
 }
 
@@ -266,7 +266,7 @@ type fetchFn func(
 	opts doOptions,
 ) (*Page, error)
 
-func (s *Scraper) fetchHTTP(
+func (c *Client) fetchHTTP(
 	ctx context.Context,
 	req *http.Request,
 	reqBody []byte,
@@ -302,13 +302,13 @@ func (s *Scraper) fetchHTTP(
 		if err != nil {
 			return nil, err
 		}
-		resp, err = s.httpClient.Do(rreq)
+		resp, err = c.httpClient.Do(rreq)
 		if err != nil {
 			return nil, fmt.Errorf("failed to perform http get: %w", err)
 		}
 		rdr := resp.Body
-		if s.respBodyLimit > 0 {
-			rdr = http.MaxBytesReader(nil, resp.Body, s.respBodyLimit)
+		if c.respBodyLimit > 0 {
+			rdr = http.MaxBytesReader(nil, resp.Body, c.respBodyLimit)
 		}
 		if resp.Uncompressed {
 			resp.Header.Add("X-Uncompressed-Content", "true")
@@ -333,8 +333,8 @@ func (s *Scraper) fetchHTTP(
 			continue
 		}
 		if opts.ReSilentThrottle != nil && opts.ReSilentThrottle.Match(body) {
-			n := s.requests.Load()
-			rate := float64(n) / (time.Since(s.startedAt).Minutes())
+			n := c.requests.Load()
+			rate := float64(n) / (time.Since(c.startedAt).Minutes())
 			log.Warn().
 				Str("rate", fmt.Sprintf("%0.3f/m", rate)).
 				Msg("silently throttled")
@@ -382,25 +382,25 @@ func (s *Scraper) fetchHTTP(
 	}, nil
 }
 
-func (s *Scraper) fetchBrowser(
+func (c *Client) fetchBrowser(
 	ctx context.Context,
 	req *http.Request,
 	reqBody []byte,
 	opts doOptions,
 ) (*Page, error) {
-	if s.browser == nil {
-		if err := s.startBrowser(); err != nil {
+	if c.browser == nil {
+		if err := c.startBrowser(); err != nil {
 			return nil, fmt.Errorf("failed to start browser: %w", err)
 		}
 	}
-	if !s.browser.IsConnected() {
+	if !c.browser.IsConnected() {
 		return nil, fmt.Errorf("browser is not connected")
 	}
 	if req.Method != "GET" {
 		return nil, fmt.Errorf("browser only supports requests with GET method")
 	}
 
-	bctx, err := s.browser.NewContext(playwright.BrowserNewContextOptions{
+	bctx, err := c.browser.NewContext(playwright.BrowserNewContextOptions{
 		ServiceWorkers: playwright.ServiceWorkerPolicyBlock,
 	})
 	if err != nil {
@@ -444,7 +444,7 @@ func (s *Scraper) fetchBrowser(
 			for k, v := range req.Headers() {
 				r.Header.Set(k, v)
 			}
-			return s.fetchHTTP(ctx, r, reqBody, opts)
+			return c.fetchHTTP(ctx, r, reqBody, opts)
 		})
 	})
 	if err != nil {
@@ -501,7 +501,7 @@ func (s *Scraper) fetchBrowser(
 	}, nil
 }
 
-func (s *Scraper) do(
+func (c *Client) do(
 	ctx context.Context,
 	req *http.Request,
 	opts doOptions,
@@ -509,14 +509,15 @@ func (s *Scraper) do(
 ) (page *Page, err error) {
 	start := time.Now()
 
-	bkey, reqBody, err := s.blobKey(req)
+	bkey, reqBody, err := c.blobKey(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create blob key: %w", err)
 	}
 
 	if !opts.Replace {
-		b, err := s.bucket.GetBlob(ctx, bkey)
-		if !errors.As(err, toPtr(&blob.NotFoundError{})) {
+		b, err := c.bucket.GetBlob(ctx, bkey)
+		var notFound *blob.NotFoundError
+		if !errors.As(err, &notFound) {
 			if err != nil {
 				return nil, fmt.Errorf("failed to read from blob: %w", err)
 			}
@@ -549,7 +550,7 @@ func (s *Scraper) do(
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal page: %w", err)
 		}
-		if err := s.bucket.SetBlob(ctx, bkey, b); err != nil {
+		if err := c.bucket.SetBlob(ctx, bkey, b); err != nil {
 			return nil, fmt.Errorf("failed to write page: %w", err)
 		}
 	}
@@ -570,7 +571,7 @@ func (s *Scraper) do(
 	return page, nil
 }
 
-func (s *Scraper) blobKey(req *http.Request) (string, []byte, error) {
+func (c *Client) blobKey(req *http.Request) (string, []byte, error) {
 	var buf bytes.Buffer
 	buf.WriteString(req.URL.String())
 	buf.WriteString(".")
@@ -580,7 +581,7 @@ func (s *Scraper) blobKey(req *http.Request) (string, []byte, error) {
 		return "", nil, err
 	}
 	buf.WriteString(".")
-	body, err := s.peekRequestBody(req)
+	body, err := c.peekRequestBody(req)
 	if err != nil {
 		return "", nil, err
 	}
@@ -592,12 +593,12 @@ func (s *Scraper) blobKey(req *http.Request) (string, []byte, error) {
 	return bkey, body, nil
 }
 
-func (s *Scraper) peekRequestBody(req *http.Request) ([]byte, error) {
+func (c *Client) peekRequestBody(req *http.Request) ([]byte, error) {
 	var body []byte
 	if req.Body != nil {
 		rdr := req.Body
-		if s.requestBodyLimit > 0 {
-			rdr = http.MaxBytesReader(nil, req.Body, s.requestBodyLimit)
+		if c.requestBodyLimit > 0 {
+			rdr = http.MaxBytesReader(nil, req.Body, c.requestBodyLimit)
 		}
 		var err error
 		body, err = io.ReadAll(rdr)

@@ -153,7 +153,7 @@ func initLogger(ctx context.Context, opts loggerOptions) (context.Context, zerol
 	return lg.WithContext(ctx), lg
 }
 
-func newScraper(cmd *cobra.Command, args []string) (*limpet.Scraper, error) {
+func newClient(cmd *cobra.Command, args []string) (*limpet.Client, error) {
 	ctx := cmd.Context()
 	bucketURL := mustFlagString(cmd, "bucket-url")
 	cacheDir := mustFlagString(cmd, "cache-dir")
@@ -180,9 +180,9 @@ func newScraper(cmd *cobra.Command, args []string) (*limpet.Scraper, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bucket: %w", err)
 	}
-	sc, err := limpet.NewScraper(ctx, bucket)
+	sc, err := limpet.NewClient(ctx, bucket)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create scraper: %w", err)
+		return nil, fmt.Errorf("failed to create client: %w", err)
 	}
 	return sc, nil
 }

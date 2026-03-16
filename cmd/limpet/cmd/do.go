@@ -57,9 +57,9 @@ func init() {
 
 func doRunE(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	sc, err := newScraper(cmd, args)
+	sc, err := newClient(cmd, args)
 	if err != nil {
-		return fmt.Errorf("failed to create scraper: %w", err)
+		return fmt.Errorf("failed to create client: %w", err)
 	}
 	method := mustFlagString(cmd, "method")
 	browser := mustFlagBool(cmd, "browser")
@@ -79,10 +79,10 @@ func doRunE(cmd *cobra.Command, args []string) error {
 	if forceRefetch {
 		opts = append(opts, &limpet.OptDoReplace{})
 	}
-	log.Info().Interface("opts", opts).Msgf("scraping %s", args[0])
+	log.Info().Interface("opts", opts).Msgf("fetching %s", args[0])
 	page, err := sc.Do(ctx, req, opts...)
 	if err != nil {
-		return fmt.Errorf("failed to scrape: %w", err)
+		return fmt.Errorf("failed to fetch: %w", err)
 	}
 	if page.Response.StatusCode >= 400 {
 		log.Error().Msgf("non-200 status code: %d", page.Response.StatusCode)
