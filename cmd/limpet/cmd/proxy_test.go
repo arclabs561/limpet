@@ -3,7 +3,6 @@ package cmd
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -58,85 +57,108 @@ func TestProxyHTTP(t *testing.T) {
 	}
 }
 
-func TestProxyCONNECT(t *testing.T) {
+func TestProxyHTTPNon200(t *testing.T) {
 	pt := setupProxy(t)
 
-	// TLS origin server.
-	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte("hello over TLS"))
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte("not found"))
 	}))
 	t.Cleanup(origin.Close)
 
-	// Connect to proxy.
 	conn, err := net.DialTimeout("tcp", pt.addr, 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
 	defer conn.Close()
 
-	// Send CONNECT request to proxy.
-	_, originPort, _ := net.SplitHostPort(origin.Listener.Addr().String())
-	connectHost := net.JoinHostPort("127.0.0.1", originPort)
-	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", connectHost, connectHost)
-
-	// Read the 200 Connection Established response.
-	br := bufio.NewReader(conn)
-	resp, err := http.ReadResponse(br, nil)
-	if err != nil {
-		t.Fatalf("read CONNECT response: %v", err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("CONNECT status = %d, want 200", resp.StatusCode)
-	}
-
-	// Upgrade to TLS over the tunnel.
-	tlsConn := tls.Client(conn, &tls.Config{
-		InsecureSkipVerify: true,
-	})
-	if err := tlsConn.HandshakeContext(context.Background()); err != nil {
-		t.Fatalf("TLS handshake: %v", err)
-	}
-
-	// Send an HTTP request through the TLS tunnel.
-	req, _ := http.NewRequest("GET", "https://"+connectHost+"/secure", nil)
-	if err := req.Write(tlsConn); err != nil {
-		t.Fatalf("write request over tunnel: %v", err)
-	}
-
-	resp, err = http.ReadResponse(bufio.NewReader(tlsConn), req)
-	if err != nil {
-		t.Fatalf("read response over tunnel: %v", err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200", resp.StatusCode)
-	}
-	if string(body) != "hello over TLS" {
-		t.Errorf("body = %q, want %q", body, "hello over TLS")
-	}
-}
-
-func TestProxyCONNECTBadUpstream(t *testing.T) {
-	pt := setupProxy(t)
-
-	conn, err := net.DialTimeout("tcp", pt.addr, 5*time.Second)
-	if err != nil {
-		t.Fatalf("dial proxy: %v", err)
-	}
-	defer conn.Close()
-
-	// CONNECT to a port nothing listens on.
-	fmt.Fprintf(conn, "CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n")
+	reqLine := fmt.Sprintf("GET %s/missing HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
+		origin.URL, origin.Listener.Addr().String())
+	fmt.Fprint(conn, reqLine)
 
 	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != 404 {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+	if string(body) != "not found" {
+		t.Errorf("body = %q, want %q", body, "not found")
+	}
+}
+
+func TestProxyCONNECTBlocksLoopback(t *testing.T) {
+	pt := setupProxy(t)
+
+	conn, err := net.DialTimeout("tcp", pt.addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+
+	// CONNECT to loopback should be blocked by SSRF check.
+	fmt.Fprintf(conn, "CONNECT 127.0.0.1:443 HTTP/1.1\r\nHost: 127.0.0.1:443\r\n\r\n")
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestProxyCONNECTBlocksPrivate(t *testing.T) {
+	pt := setupProxy(t)
+
+	conn, err := net.DialTimeout("tcp", pt.addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+
+	// CONNECT to RFC 1918 address should be blocked.
+	fmt.Fprintf(conn, "CONNECT 10.0.0.1:443 HTTP/1.1\r\nHost: 10.0.0.1:443\r\n\r\n")
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestValidateConnectHost(t *testing.T) {
+	tests := []struct {
+		host    string
+		wantErr bool
+	}{
+		{"127.0.0.1:443", true},
+		{"localhost:443", true},
+		{"10.0.0.1:443", true},
+		{"192.168.1.1:443", true},
+		{"172.16.0.1:443", true},
+		{"169.254.1.1:443", true},
+		{"[::1]:443", true},
+		// Public addresses should pass.
+		{"1.1.1.1:443", false},
+		{"8.8.8.8:443", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			err := validateConnectHost(tt.host)
+			if tt.wantErr && err == nil {
+				t.Errorf("validateConnectHost(%q) = nil, want error", tt.host)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("validateConnectHost(%q) = %v, want nil", tt.host, err)
+			}
+		})
 	}
 }
 

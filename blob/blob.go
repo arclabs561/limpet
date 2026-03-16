@@ -249,7 +249,9 @@ func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) 
 			_ = r.Close()
 			return nil, fmt.Errorf("failed to create zstd reader: %w", err)
 		}
-		data, err := io.ReadAll(zr)
+		// Cap decompressed size to prevent zip-bomb style memory exhaustion.
+		const maxDecompressed = 500e6 // 500 MB
+		data, err := io.ReadAll(io.LimitReader(zr, maxDecompressed))
 		if err != nil {
 			zr.Close()
 			_ = r.Close()
