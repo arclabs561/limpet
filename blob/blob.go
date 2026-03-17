@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,7 +22,6 @@ import (
 	"gocloud.dev/gcerrors"
 )
 
-const defaultCacheDir = ".cache/limpet/blob/"
 const defaultCacheTTL = 24 * time.Hour
 
 // BucketConfig configures a Bucket.
@@ -57,7 +58,11 @@ func NewBucket(
 	if !cfg.NoCache {
 		cacheDir := cfg.CacheDir
 		if cacheDir == "" {
-			cacheDir = defaultCacheDir
+			base, err := os.UserCacheDir()
+			if err != nil {
+				return nil, fmt.Errorf("cannot determine cache directory: %w", err)
+			}
+			cacheDir = filepath.Join(base, "limpet", "blob")
 		}
 		cacheOpts := badger.DefaultOptions(cacheDir).
 			WithLogger(newBadgerLogger(*log.Ctx(ctx)))
