@@ -25,6 +25,7 @@ type Transport struct {
 	rateLimit        ratelimit.Limiter
 	requestBodyLimit int64
 	respBodyLimit    int64
+	ignoreHeaders    map[string]bool
 }
 
 // TransportOption configures a Transport.
@@ -47,6 +48,20 @@ func TransportWithRequestBodyLimit(n int64) TransportOption {
 // 0 means no limit.
 func TransportWithResponseBodyLimit(n int64) TransportOption {
 	return func(t *Transport) { t.respBodyLimit = n }
+}
+
+// TransportWithIgnoreHeaders excludes the named headers from cache key
+// computation. Useful when User-Agent or Accept-Encoding vary between
+// requests but should map to the same cache entry.
+func TransportWithIgnoreHeaders(names ...string) TransportOption {
+	return func(t *Transport) {
+		if t.ignoreHeaders == nil {
+			t.ignoreHeaders = make(map[string]bool)
+		}
+		for _, n := range names {
+			t.ignoreHeaders[http.CanonicalHeaderKey(n)] = true
+		}
+	}
 }
 
 // NewTransport creates a caching Transport backed by the given bucket.
@@ -99,7 +114,7 @@ func cachePolicyFromContext(ctx context.Context) CachePolicy {
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	policy := cachePolicyFromContext(req.Context())
 
-	key, _, err := blobKey(req, t.requestBodyLimit)
+	key, _, err := blobKey(req, t.requestBodyLimit, t.ignoreHeaders)
 	if err != nil {
 		return nil, fmt.Errorf("limpet: failed to compute cache key: %w", err)
 	}
