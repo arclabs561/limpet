@@ -146,6 +146,36 @@ page, _ := cl.Do(ctx, req, limpet.DoConfig{
 })
 ```
 
+### Batch fetching
+
+```go
+// Fetch multiple URLs concurrently (up to 5 at a time)
+err := cl.GetMany(ctx, urls, 5, limpet.DoConfig{}, func(url string, page *limpet.Page, err error) error {
+    if err != nil {
+        return err // stops remaining fetches
+    }
+    fmt.Printf("%s: %d bytes\n", url, len(page.Response.Body))
+    return nil
+})
+```
+
+### Error types
+
+`Do` and `Get` return typed errors for non-200 responses and throttling:
+
+```go
+page, err := cl.Get(ctx, url)
+var statusErr *limpet.StatusError
+if errors.As(err, &statusErr) {
+    fmt.Printf("HTTP %d\n", statusErr.Page.Response.StatusCode)
+}
+
+var throttleErr *limpet.ThrottledError
+if errors.As(err, &throttleErr) {
+    // site returned a captcha/block page matching SilentThrottle pattern
+}
+```
+
 ### Version history and change detection
 
 ```go
@@ -189,6 +219,8 @@ defer bucket.Close()
 
 tr := limpet.NewTransport(bucket,
     limpet.TransportWithRateLimit(10),
+    limpet.TransportWithRequestBodyLimit(10e6),   // 10 MB (default)
+    limpet.TransportWithResponseBodyLimit(100e6), // 100 MB (default)
 )
 
 client := &http.Client{Transport: tr}
