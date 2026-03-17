@@ -29,7 +29,7 @@ func (c *Client) GetMany(
 	sem := make(chan struct{}, concurrency)
 
 	var (
-		mu      sync.Mutex
+		mu       sync.Mutex
 		firstErr error
 	)
 

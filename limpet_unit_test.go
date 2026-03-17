@@ -22,11 +22,11 @@ func TestParseRateLimit(t *testing.T) {
 		{"disabled", false},
 		{"off", false},
 		{"nolimit", false},
-		{"10/m", false},   // bare duration unit, prepends "1"
-		{"10/s", false},   // bare duration unit
-		{"abc", true},     // non-numeric
-		{"10/xyz", true},  // bad duration
-		{"", true},        // empty
+		{"10/m", false},  // bare duration unit, prepends "1"
+		{"10/s", false},  // bare duration unit
+		{"abc", true},    // non-numeric
+		{"10/xyz", true}, // bad duration
+		{"", true},       // empty
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
