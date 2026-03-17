@@ -155,7 +155,11 @@ func setup(t *testing.T) testState {
 	}
 	t.Cleanup(func() { bucket.Close() })
 
-	cl, err := limpet.NewClient(ctx, bucket)
+	var clientOpts []limpet.Option
+	if os.Getenv("CI") != "" {
+		clientOpts = append(clientOpts, limpet.WithChromiumSandbox(false))
+	}
+	cl, err := limpet.NewClient(ctx, bucket, clientOpts...)
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
