@@ -65,6 +65,7 @@ type Client struct {
 	pw               *playwright.Playwright
 	browser          playwright.Browser
 	alwaysDoBrowser  bool
+	chromiumSandbox  bool
 	startBrowser     func() error
 	requestBodyLimit int64 // no limit when <= 0
 	respBodyLimit    int64 // no limit when <= 0
@@ -79,6 +80,13 @@ type Option func(*Client)
 // WithBrowser configures the client to always use headless browser.
 func WithBrowser() Option {
 	return func(c *Client) { c.alwaysDoBrowser = true }
+}
+
+// WithChromiumSandbox controls whether the headless Chromium browser runs
+// with OS-level sandboxing. Defaults to true. Set to false in environments
+// where sandboxing is unsupported (e.g. CI containers without suid sandbox).
+func WithChromiumSandbox(enabled bool) Option {
+	return func(c *Client) { c.chromiumSandbox = enabled }
 }
 
 // WithRateLimit sets a programmatic rate limit, overriding the env var.
@@ -97,6 +105,7 @@ func NewClient(
 	c := &Client{
 		bucket:           bucket,
 		mu:               new(sync.Mutex),
+		chromiumSandbox:  true,
 		requestBodyLimit: 10e6,  // 10 MB
 		respBodyLimit:    100e6, // 100 MB
 		rateLimit:        ratelimit.New(100),
@@ -222,7 +231,7 @@ func (c *Client) newBrowser() (err error) {
 	log.Debug().Msg("launching headless chromium browser")
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		Headless:        playwright.Bool(true),
-		ChromiumSandbox: playwright.Bool(true),
+		ChromiumSandbox: playwright.Bool(c.chromiumSandbox),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to launch browser: %w", err)
