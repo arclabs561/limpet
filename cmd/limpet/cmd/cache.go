@@ -30,6 +30,13 @@ var cacheGetCmd = &cobra.Command{
 	RunE:  cacheGetRunE,
 }
 
+var cacheRmCmd = &cobra.Command{
+	Use:   "rm <key>",
+	Short: "Delete a cached entry",
+	Args:  cobra.ExactArgs(1),
+	RunE:  cacheRmRunE,
+}
+
 func init() {
 	cacheLsCmd.Flags().BoolP("json", "j", false, "output as JSON")
 	cacheGetCmd.Flags().BoolP("headers", "i", false, "include response headers")
@@ -37,6 +44,7 @@ func init() {
 
 	cacheCmd.AddCommand(cacheLsCmd)
 	cacheCmd.AddCommand(cacheGetCmd)
+	cacheCmd.AddCommand(cacheRmCmd)
 }
 
 func cacheLsRunE(cmd *cobra.Command, args []string) error {
@@ -134,5 +142,21 @@ func cacheGetRunE(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(cmd.OutOrStdout())
 	}
 	fmt.Fprint(cmd.OutOrStdout(), string(page.Response.Body))
+	return nil
+}
+
+func cacheRmRunE(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
+	bucket, err := newBucket(cmd)
+	if err != nil {
+		return err
+	}
+	defer bucket.Close()
+
+	key := args[0]
+	if err := bucket.DeleteBlob(ctx, key); err != nil {
+		return fmt.Errorf("failed to delete %q: %w", key, err)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "deleted %s\n", key)
 	return nil
 }
