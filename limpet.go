@@ -364,7 +364,7 @@ func (c *Client) fetchHTTP(
 	dur := time.Since(start)
 	return &Page{
 		Meta: PageMeta{
-			Version:   LatestPageVersion,
+			Version:   latestPageVersion,
 			Source:    "http.plain",
 			FetchedAt: time.Now(),
 			FetchDur:  dur,
@@ -497,7 +497,7 @@ func (c *Client) fetchBrowser(
 	}
 	return &Page{
 		Meta: PageMeta{
-			Version:   LatestPageVersion,
+			Version:   latestPageVersion,
 			Source:    "http.browser",
 			FetchedAt: time.Now(),
 		},
@@ -586,7 +586,9 @@ func (c *Client) do(
 		// Write a timestamped archive snapshot for version history.
 		if opts.Archive {
 			akey := archiveKey(bkey, page.Meta.FetchedAt)
-			_ = writeCachedPage(ctx, c.bucket, akey, page)
+			if err := writeCachedPage(ctx, c.bucket, akey, page); err != nil {
+				log.Warn().Err(err).Str("key", akey).Msg("failed to write archive snapshot")
+			}
 		}
 	}
 
@@ -770,9 +772,8 @@ type Limiter interface {
 	Take() time.Time
 }
 
-
-// LatestPageVersion is the current cache page schema version.
-const LatestPageVersion = 1
+// latestPageVersion is the current cache page schema version.
+const latestPageVersion = 1
 
 // Page is a cached HTTP request/response pair with metadata.
 type Page struct {

@@ -142,8 +142,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Cache write (200 only).
 	if resp.StatusCode == 200 && policy != CachePolicySkip {
 		page := pageFromRoundTrip(req, resp, body)
-		// Best-effort cache write; errors are silently ignored.
-		_ = writeCachedPage(req.Context(), t.bucket, key, page)
+		if err := writeCachedPage(req.Context(), t.bucket, key, page); err != nil {
+			return nil, fmt.Errorf("failed to write cache: %w", err)
+		}
 	}
 
 	resp.Header.Set("X-Limpet-Source", "fetch")
@@ -164,7 +165,7 @@ func (t *Transport) cacheRead(ctx context.Context, key string) (*http.Response, 
 func pageFromRoundTrip(req *http.Request, resp *http.Response, body []byte) *Page {
 	return &Page{
 		Meta: PageMeta{
-			Version:   LatestPageVersion,
+			Version:   latestPageVersion,
 			FetchedAt: time.Now(),
 		},
 		Request: PageRequest{
