@@ -170,7 +170,7 @@ func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte) error {
 	}
 	if bu.cache != nil {
 		err := bu.cache.Update(func(txn *badger.Txn) error {
-			entry := badger.NewEntry(bu.cacheKey(key), data).WithDiscard()
+			entry := badger.NewEntry([]byte(key), data).WithDiscard()
 			if bu.cacheTTL > 0 {
 				entry.WithTTL(bu.cacheTTL)
 			}
@@ -221,7 +221,7 @@ func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) 
 	var cacheData []byte
 	if bu.cache != nil {
 		err := bu.cache.View(func(txn *badger.Txn) error {
-			item, err := txn.Get(bu.cacheKey(key))
+			item, err := txn.Get([]byte(key))
 			if err == nil {
 				cacheData, err = item.ValueCopy(nil)
 				if err != nil {
@@ -273,7 +273,7 @@ func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) 
 		}
 		if cacheData == nil && bu.cache != nil {
 			err := bu.cache.Update(func(txn *badger.Txn) error {
-				entry := badger.NewEntry(bu.cacheKey(key), data).WithDiscard()
+				entry := badger.NewEntry([]byte(key), data).WithDiscard()
 				if bu.cacheTTL > 0 {
 					entry.WithTTL(bu.cacheTTL)
 				}
@@ -332,8 +332,25 @@ func (bu *Bucket) ListCache(prefix string) ([]CacheEntry, error) {
 	return entries, err
 }
 
-func (bu *Bucket) cacheKey(key string) []byte {
-	return []byte(key)
+// DeleteBlob removes a key from both the remote bucket and local cache.
+func (bu *Bucket) DeleteBlob(ctx context.Context, key string) error {
+	key += ".zst"
+	if bu.bucket != nil {
+		if err := bu.bucket.Delete(ctx, key); err != nil {
+			if gcerrors.Code(err) != gcerrors.NotFound {
+				return fmt.Errorf("failed to delete from bucket: %w", err)
+			}
+		}
+	}
+	if bu.cache != nil {
+		err := bu.cache.Update(func(txn *badger.Txn) error {
+			return txn.Delete([]byte(key))
+		})
+		if err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
+			return fmt.Errorf("failed to delete from cache: %w", err)
+		}
+	}
+	return nil
 }
 
 var _ badger.Logger = (*badgerLogger)(nil)
