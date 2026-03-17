@@ -27,7 +27,7 @@ jobs:
           /home/runner/.cache/ms-playwright-go
           /home/runner/.cache/ms-playwright
         key: ${{ runner.os }}-playwright
-    - run: npm install playwright@1.37.1
+    - run: npm install playwright@1.57.0
     - run: go mod download
     - run: go run github.com/playwright-community/playwright-go/cmd/playwright install --with-deps
     - env:

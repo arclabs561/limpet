@@ -24,4 +24,4 @@ lint-install:
   go install github.com/google/yamlfmt/cmd/yamlfmt@v0.9.0
   go install github.com/rhysd/actionlint/cmd/actionlint@v1.6.25
   python3 -m pip install yamllint==v1.32.0
-  go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.54.2
+  go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
