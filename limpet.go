@@ -69,6 +69,7 @@ type Client struct {
 	startBrowser     func() error
 	requestBodyLimit int64 // no limit when <= 0
 	respBodyLimit    int64 // no limit when <= 0
+	ignoreHeaders    map[string]bool
 	retry            RetryConfig
 	rateLimit        ratelimit.Limiter
 	startedAt        time.Time
@@ -100,6 +101,20 @@ func WithRequestBodyLimit(n int64) Option {
 // 0 means no limit. Default: 100 MB.
 func WithResponseBodyLimit(n int64) Option {
 	return func(c *Client) { c.respBodyLimit = n }
+}
+
+// WithIgnoreHeaders excludes the named headers from cache key computation.
+// Useful for scraping where User-Agent or Accept-Encoding vary between
+// requests but should map to the same cache entry.
+func WithIgnoreHeaders(names ...string) Option {
+	return func(c *Client) {
+		if c.ignoreHeaders == nil {
+			c.ignoreHeaders = make(map[string]bool)
+		}
+		for _, n := range names {
+			c.ignoreHeaders[http.CanonicalHeaderKey(n)] = true
+		}
+	}
 }
 
 // WithRateLimit sets a programmatic rate limit, overriding the env var.
@@ -664,14 +679,14 @@ func (c *Client) do(
 }
 
 func (c *Client) blobKey(req *http.Request) (string, []byte, error) {
-	return blobKey(req, c.requestBodyLimit)
+	return blobKey(req, c.requestBodyLimit, c.ignoreHeaders)
 }
 
 // blobKey computes a deterministic cache key from an HTTP request.
 // The key is SHA-256 of (URL + method + headers + body), placed under the
 // request hostname. bodyLimit limits how much of the request body is read
 // (0 means no limit). The request body is restored after reading.
-func blobKey(req *http.Request, bodyLimit int64) (string, []byte, error) {
+func blobKey(req *http.Request, bodyLimit int64, ignoreHeaders map[string]bool) (string, []byte, error) {
 	var buf bytes.Buffer
 	buf.WriteString(req.URL.String())
 	buf.WriteString(".")
@@ -682,6 +697,9 @@ func blobKey(req *http.Request, bodyLimit int64) (string, []byte, error) {
 	// different hashes for identical headers.
 	keys := make([]string, 0, len(req.Header))
 	for k := range req.Header {
+		if ignoreHeaders[http.CanonicalHeaderKey(k)] {
+			continue
+		}
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)

@@ -136,6 +136,39 @@ func TestBlobKey(t *testing.T) {
 	})
 }
 
+func TestBlobKeyIgnoreHeaders(t *testing.T) {
+	c := &Client{
+		ignoreHeaders: map[string]bool{
+			"User-Agent":      true,
+			"Accept-Encoding": true,
+		},
+	}
+
+	req1, _ := http.NewRequest("GET", "https://example.com/page", nil)
+	req1.Header.Set("User-Agent", "chrome")
+	req1.Header.Set("Accept", "text/html")
+
+	req2, _ := http.NewRequest("GET", "https://example.com/page", nil)
+	req2.Header.Set("User-Agent", "firefox")
+	req2.Header.Set("Accept", "text/html")
+
+	key1, _, _ := c.blobKey(req1)
+	key2, _, _ := c.blobKey(req2)
+	if key1 != key2 {
+		t.Errorf("ignored header changed cache key: %q vs %q", key1, key2)
+	}
+
+	// Non-ignored header should still differentiate.
+	req3, _ := http.NewRequest("GET", "https://example.com/page", nil)
+	req3.Header.Set("User-Agent", "chrome")
+	req3.Header.Set("Accept", "application/json")
+
+	key3, _, _ := c.blobKey(req3)
+	if key1 == key3 {
+		t.Errorf("non-ignored header difference produced same key")
+	}
+}
+
 func TestArchiveKey(t *testing.T) {
 	ts := time.Date(2026, 3, 16, 21, 30, 45, 0, time.UTC)
 

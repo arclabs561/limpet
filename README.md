@@ -54,6 +54,9 @@ limpet cache get example.com/abc123.json
 
 # Show page metadata (URL, status, fetch time)
 limpet cache get --meta example.com/abc123.json
+
+# Delete a cached entry
+limpet cache rm example.com/abc123.json
 ```
 
 ### Global flags
@@ -136,6 +139,7 @@ page, _ = cl.Get(ctx, "https://example.com")
 - `limpet.WithRateLimit(10)` -- set programmatic rate limit
 - `limpet.WithRequestBodyLimit(10e6)` -- max request body for cache key (default 10 MB, 0 = no limit)
 - `limpet.WithResponseBodyLimit(100e6)` -- max response body to cache (default 100 MB, 0 = no limit)
+- `limpet.WithIgnoreHeaders("User-Agent", "Accept-Encoding")` -- exclude headers from cache key (different browsers, same cache entry)
 - `limpet.WithRetry(limpet.RetryConfig{Attempts: 3, MinWait: 2 * time.Second})` -- configure retry (zero fields keep defaults: 5 attempts, 1s min, 1m max, 1s jitter)
 
 ### Per-request options (DoConfig)
@@ -225,6 +229,7 @@ tr := limpet.NewTransport(bucket,
     limpet.TransportWithRateLimit(10),
     limpet.TransportWithRequestBodyLimit(10e6),   // 10 MB (default)
     limpet.TransportWithResponseBodyLimit(100e6), // 100 MB (default)
+    limpet.TransportWithIgnoreHeaders("User-Agent", "Accept-Encoding"),
 )
 
 client := &http.Client{Transport: tr}
