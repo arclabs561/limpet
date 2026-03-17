@@ -118,11 +118,11 @@ func writeHTTPError(conn net.Conn, status int, cause error) {
 	resp := &http.Response{
 		StatusCode: status,
 		ProtoMajor: 1, ProtoMinor: 1,
-		Header:     make(http.Header),
-		Body:       http.NoBody,
+		Header: make(http.Header),
+		Body:   http.NoBody,
 	}
 	resp.Header.Set("Connection", "close")
-	resp.Write(conn)
+	_ = resp.Write(conn) // best-effort error response; connection is closing
 }
 
 // handleConnect implements HTTP CONNECT tunneling for HTTPS proxying.
