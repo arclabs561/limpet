@@ -137,7 +137,17 @@ func (bu *Bucket) Close() {
 	}
 }
 
+type ctxKeyCacheTTL struct{}
+
+// WithCacheTTL returns a context that overrides the bucket's default cache TTL
+// for writes made with this context. Use 0 for no expiry, or a positive
+// duration for a custom TTL.
+func WithCacheTTL(ctx context.Context, ttl time.Duration) context.Context {
+	return context.WithValue(ctx, ctxKeyCacheTTL{}, ttl)
+}
+
 // SetBlob writes data to the remote bucket and local cache under the given key.
+// If the context carries a TTL from WithCacheTTL, it overrides the bucket default.
 func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte) error {
 	key += ".zst"
 	if bu.bucket != nil {
@@ -169,10 +179,14 @@ func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte) error {
 		}
 	}
 	if bu.cache != nil {
+		ttl := bu.cacheTTL
+		if override, ok := ctx.Value(ctxKeyCacheTTL{}).(time.Duration); ok {
+			ttl = override
+		}
 		err := bu.cache.Update(func(txn *badger.Txn) error {
 			entry := badger.NewEntry([]byte(key), data).WithDiscard()
-			if bu.cacheTTL > 0 {
-				entry.WithTTL(bu.cacheTTL)
+			if ttl > 0 {
+				entry.WithTTL(ttl)
 			}
 			return txn.SetEntry(entry)
 		})

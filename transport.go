@@ -26,6 +26,7 @@ type Transport struct {
 	requestBodyLimit int64
 	respBodyLimit    int64
 	ignoreHeaders    map[string]bool
+	ignoreParams     map[string]bool
 }
 
 // TransportOption configures a Transport.
@@ -64,6 +65,19 @@ func TransportWithIgnoreHeaders(names ...string) TransportOption {
 	}
 }
 
+// TransportWithIgnoreParams excludes the named query parameters from cache key
+// computation. Useful for stripping auth tokens or tracking params.
+func TransportWithIgnoreParams(names ...string) TransportOption {
+	return func(t *Transport) {
+		if t.ignoreParams == nil {
+			t.ignoreParams = make(map[string]bool)
+		}
+		for _, n := range names {
+			t.ignoreParams[n] = true
+		}
+	}
+}
+
 // NewTransport creates a caching Transport backed by the given bucket.
 func NewTransport(bucket *blob.Bucket, opts ...TransportOption) *Transport {
 	t := &Transport{
@@ -82,6 +96,13 @@ func (t *Transport) base() http.RoundTripper {
 		return t.Base
 	}
 	return http.DefaultTransport
+}
+
+// WithCacheTTL returns a context that overrides the default cache TTL for
+// writes made with this context. Works with both Client and Transport.
+// Use 0 for no expiry, or a positive duration for a custom TTL.
+func WithCacheTTL(ctx context.Context, ttl time.Duration) context.Context {
+	return blob.WithCacheTTL(ctx, ttl)
 }
 
 // CachePolicy controls per-request caching behavior.
@@ -114,7 +135,7 @@ func cachePolicyFromContext(ctx context.Context) CachePolicy {
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	policy := cachePolicyFromContext(req.Context())
 
-	key, _, err := blobKey(req, t.requestBodyLimit, t.ignoreHeaders)
+	key, _, err := blobKey(req, t.requestBodyLimit, t.ignoreHeaders, t.ignoreParams)
 	if err != nil {
 		return nil, fmt.Errorf("limpet: failed to compute cache key: %w", err)
 	}
