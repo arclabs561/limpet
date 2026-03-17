@@ -69,6 +69,7 @@ type Client struct {
 	startBrowser     func() error
 	requestBodyLimit int64 // no limit when <= 0
 	respBodyLimit    int64 // no limit when <= 0
+	retry            RetryConfig
 	rateLimit        ratelimit.Limiter
 	startedAt        time.Time
 	requests         atomic.Uint64
@@ -89,10 +90,52 @@ func WithChromiumSandbox(enabled bool) Option {
 	return func(c *Client) { c.chromiumSandbox = enabled }
 }
 
+// WithRequestBodyLimit sets the maximum request body size used for cache key
+// computation. 0 means no limit. Default: 10 MB.
+func WithRequestBodyLimit(n int64) Option {
+	return func(c *Client) { c.requestBodyLimit = n }
+}
+
+// WithResponseBodyLimit sets the maximum response body size to read and cache.
+// 0 means no limit. Default: 100 MB.
+func WithResponseBodyLimit(n int64) Option {
+	return func(c *Client) { c.respBodyLimit = n }
+}
+
 // WithRateLimit sets a programmatic rate limit, overriding the env var.
 func WithRateLimit(rps int, opts ...ratelimit.Option) Option {
 	return func(c *Client) {
 		c.rateLimit = ratelimit.New(rps, opts...)
+	}
+}
+
+// RetryConfig controls retry behavior for failed HTTP requests.
+type RetryConfig struct {
+	// Attempts is the maximum number of tries (including the first). Default: 5.
+	Attempts int
+	// MinWait is the base wait duration for exponential backoff. Default: 1s.
+	MinWait time.Duration
+	// MaxWait caps the backoff duration. Default: 1m.
+	MaxWait time.Duration
+	// Jitter adds random jitter up to this duration per attempt. Default: 1s.
+	Jitter time.Duration
+}
+
+// WithRetry configures retry behavior. Zero-value fields keep defaults.
+func WithRetry(cfg RetryConfig) Option {
+	return func(c *Client) {
+		if cfg.Attempts > 0 {
+			c.retry.Attempts = cfg.Attempts
+		}
+		if cfg.MinWait > 0 {
+			c.retry.MinWait = cfg.MinWait
+		}
+		if cfg.MaxWait > 0 {
+			c.retry.MaxWait = cfg.MaxWait
+		}
+		if cfg.Jitter > 0 {
+			c.retry.Jitter = cfg.Jitter
+		}
 	}
 }
 
@@ -108,8 +151,14 @@ func NewClient(
 		chromiumSandbox:  true,
 		requestBodyLimit: 10e6,  // 10 MB
 		respBodyLimit:    100e6, // 100 MB
-		rateLimit:        ratelimit.New(100),
-		startedAt:        time.Now(),
+		retry: RetryConfig{
+			Attempts: 5,
+			MinWait:  1 * time.Second,
+			MaxWait:  1 * time.Minute,
+			Jitter:   1 * time.Second,
+		},
+		rateLimit: ratelimit.New(100),
+		startedAt: time.Now(),
 	}
 
 	// Check env var for rate limit override.
@@ -287,15 +336,12 @@ func (c *Client) fetchHTTP(
 	var resp *http.Response
 	var body []byte
 	var err error
-	attemptsMax := 5
-	waitMin := 1 * time.Second
-	waitMax := 1 * time.Minute
-	waitJitter := 1 * time.Second
+	retry := c.retry
 	wait := func(attempt int) error {
-		d := time.Duration(math.Pow(2, float64(attempt))) * waitMin
-		d += time.Duration(rand.Intn(int(waitJitter)))
-		if d > waitMax {
-			d = waitMax
+		d := time.Duration(math.Pow(2, float64(attempt))) * retry.MinWait
+		d += time.Duration(rand.Intn(int(retry.Jitter)))
+		if d > retry.MaxWait {
+			d = retry.MaxWait
 		}
 		t := time.After(d)
 		select {
@@ -305,7 +351,7 @@ func (c *Client) fetchHTTP(
 			return nil
 		}
 	}
-	for i := 0; i < attemptsMax; i++ {
+	for i := 0; i < retry.Attempts; i++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -320,7 +366,7 @@ func (c *Client) fetchHTTP(
 
 		resp, err = c.httpClient.Do(req)
 		if err != nil {
-			if lastAttempt := i >= attemptsMax-1; lastAttempt {
+			if lastAttempt := i >= retry.Attempts-1; lastAttempt {
 				return nil, fmt.Errorf("failed to perform http request: %w", err)
 			}
 			log.Warn().Err(err).Int("attempt", i).Msg("http request failed, retrying")
@@ -337,7 +383,7 @@ func (c *Client) fetchHTTP(
 		}
 		body, err = io.ReadAll(rdr)
 		resp.Body.Close()
-		lastAttempt := i >= attemptsMax-1
+		lastAttempt := i >= retry.Attempts-1
 		if err != nil {
 			if lastAttempt {
 				return nil, fmt.Errorf("failed to read http resp body: %w", err)

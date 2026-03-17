@@ -132,7 +132,11 @@ page, _ = cl.Get(ctx, "https://example.com")
 ### Client options (construction time)
 
 - `limpet.WithBrowser()` -- always use headless browser
+- `limpet.WithChromiumSandbox(false)` -- disable Chromium OS sandbox (for CI containers)
 - `limpet.WithRateLimit(10)` -- set programmatic rate limit
+- `limpet.WithRequestBodyLimit(10e6)` -- max request body for cache key (default 10 MB, 0 = no limit)
+- `limpet.WithResponseBodyLimit(100e6)` -- max response body to cache (default 100 MB, 0 = no limit)
+- `limpet.WithRetry(limpet.RetryConfig{Attempts: 3, MinWait: 2 * time.Second})` -- configure retry (zero fields keep defaults: 5 attempts, 1s min, 1m max, 1s jitter)
 
 ### Per-request options (DoConfig)
 
