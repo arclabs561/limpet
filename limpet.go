@@ -72,6 +72,7 @@ type Client struct {
 	ignoreHeaders    map[string]bool
 	ignoreParams     map[string]bool
 	cacheStatuses    map[int]bool // nil means only 200
+	userAgent        string
 	retry            RetryConfig
 	rateLimit        ratelimit.Limiter
 	startedAt        time.Time
@@ -142,6 +143,12 @@ func WithCacheStatuses(codes ...int) Option {
 			c.cacheStatuses[code] = true
 		}
 	}
+}
+
+// WithUserAgent sets a default User-Agent header on all HTTP requests.
+// The header is added before each request if not already set by the caller.
+func WithUserAgent(ua string) Option {
+	return func(c *Client) { c.userAgent = ua }
 }
 
 // WithRateLimit sets a programmatic rate limit, overriding the env var.
@@ -381,6 +388,12 @@ func (c *Client) fetchHTTP(
 	opts doOptions,
 ) (*Page, error) {
 	start := time.Now()
+
+	// Apply default User-Agent if configured and not already set.
+	if c.userAgent != "" && req.Header.Get("User-Agent") == "" {
+		req = req.Clone(req.Context())
+		req.Header.Set("User-Agent", c.userAgent)
+	}
 
 	var resp *http.Response
 	var body []byte
