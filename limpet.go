@@ -389,12 +389,6 @@ func (c *Client) fetchHTTP(
 ) (*Page, error) {
 	start := time.Now()
 
-	// Apply default User-Agent if configured and not already set.
-	if c.userAgent != "" && req.Header.Get("User-Agent") == "" {
-		req = req.Clone(req.Context())
-		req.Header.Set("User-Agent", c.userAgent)
-	}
-
 	var resp *http.Response
 	var body []byte
 	var err error
@@ -665,22 +659,40 @@ func (c *Client) do(
 ) (page *Page, err error) {
 	start := time.Now()
 
+	// Apply default User-Agent if configured and not already set.
+	if c.userAgent != "" && req.Header.Get("User-Agent") == "" {
+		req = req.Clone(req.Context())
+		req.Header.Set("User-Agent", c.userAgent)
+	}
+
 	bkey, reqBody, err := c.blobKey(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create blob key: %w", err)
 	}
 
-	if !opts.Replace {
-		page, err := readCachedPage(ctx, c.bucket, bkey)
-		var notFound *blob.NotFoundError
-		if !errors.As(err, &notFound) {
-			if err != nil {
-				return nil, fmt.Errorf("failed to read from blob: %w", err)
-			}
-			if err := errPageStatusNotOK(page); err != nil {
+	// Try reading cached page. On hit without Replace, return it.
+	// On hit with Replace (or for conditional request support), keep the
+	// cached page for ETag/Last-Modified headers and 304 handling.
+	var cachedPage *Page
+	if cp, err := readCachedPage(ctx, c.bucket, bkey); err == nil {
+		if !opts.Replace {
+			if err := errPageStatusNotOK(cp); err != nil {
 				return nil, err
 			}
-			return page, nil
+			return cp, nil
+		}
+		cachedPage = cp
+		if etag := cp.Response.Header.Get("ETag"); etag != "" {
+			req = req.Clone(req.Context())
+			req.Header.Set("If-None-Match", etag)
+		} else if lm := cp.Response.Header.Get("Last-Modified"); lm != "" {
+			req = req.Clone(req.Context())
+			req.Header.Set("If-Modified-Since", lm)
+		}
+	} else if !opts.Replace {
+		var notFound *blob.NotFoundError
+		if !errors.As(err, &notFound) {
+			return nil, fmt.Errorf("failed to read from blob: %w", err)
 		}
 	}
 
@@ -692,6 +704,12 @@ func (c *Client) do(
 	page, err = fetchFn(ctx, req, reqBody, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch page: %w", err)
+	}
+
+	// 304 Not Modified: return the cached page if available.
+	if page.Response.StatusCode == 304 && cachedPage != nil {
+		cachedPage.Meta.Source = "revalidated"
+		return cachedPage, nil
 	}
 
 	// Only cache responses with cacheable status codes to prevent transient
@@ -972,12 +990,13 @@ func (p *Page) StaleAfter(maxAge time.Duration) bool {
 }
 
 // HTTPResponse reconstructs a standard *http.Response from the cached page.
+// The returned response has its own header map (safe for concurrent use).
 func (p *Page) HTTPResponse() *http.Response {
 	return &http.Response{
 		StatusCode:       p.Response.StatusCode,
 		ProtoMajor:       p.Response.ProtoMajor,
 		ProtoMinor:       p.Response.ProtoMinor,
-		Header:           p.Response.Header,
+		Header:           p.Response.Header.Clone(),
 		Body:             io.NopCloser(bytes.NewReader(p.Response.Body)),
 		ContentLength:    p.Response.ContentLength,
 		TransferEncoding: p.Response.TransferEncoding,
