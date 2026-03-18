@@ -71,6 +71,7 @@ type Client struct {
 	respBodyLimit    int64 // no limit when <= 0
 	ignoreHeaders    map[string]bool
 	ignoreParams     map[string]bool
+	cacheStatuses    map[int]bool // nil means only 200
 	retry            RetryConfig
 	rateLimit        ratelimit.Limiter
 	startedAt        time.Time
@@ -128,6 +129,17 @@ func WithIgnoreParams(names ...string) Option {
 		}
 		for _, n := range names {
 			c.ignoreParams[n] = true
+		}
+	}
+}
+
+// WithCacheStatuses sets which HTTP status codes are eligible for caching.
+// By default only 200 is cached. Use this to also cache redirects, 404s, etc.
+func WithCacheStatuses(codes ...int) Option {
+	return func(c *Client) {
+		c.cacheStatuses = make(map[int]bool, len(codes))
+		for _, code := range codes {
+			c.cacheStatuses[code] = true
 		}
 	}
 }
@@ -213,6 +225,13 @@ func NewClient(
 		}
 	}
 	return c, nil
+}
+
+func (c *Client) isCacheable(statusCode int) bool {
+	if c.cacheStatuses == nil {
+		return statusCode == 200
+	}
+	return c.cacheStatuses[statusCode]
 }
 
 // Close shuts down the browser (if started) and releases resources.
@@ -662,9 +681,9 @@ func (c *Client) do(
 		return nil, fmt.Errorf("failed to fetch page: %w", err)
 	}
 
-	// Only cache successful (200) responses to prevent transient errors
-	// from becoming permanent cache entries.
-	if page.Response.StatusCode == 200 {
+	// Only cache responses with cacheable status codes to prevent transient
+	// errors from becoming permanent cache entries.
+	if c.isCacheable(page.Response.StatusCode) {
 		if err := writeCachedPage(ctx, c.bucket, bkey, page); err != nil {
 			return nil, fmt.Errorf("failed to write page: %w", err)
 		}
@@ -705,13 +724,14 @@ func (c *Client) blobKey(req *http.Request) (string, []byte, error) {
 func blobKey(req *http.Request, bodyLimit int64, ignoreHeaders, ignoreParams map[string]bool) (string, []byte, error) {
 	var buf bytes.Buffer
 	u := *req.URL
-	if len(ignoreParams) > 0 {
-		q := u.Query()
-		for p := range ignoreParams {
-			q.Del(p)
-		}
-		u.RawQuery = q.Encode()
+	// Normalize: lowercase host, sort query params, strip default ports.
+	u.Host = strings.ToLower(u.Host)
+	u.Host = stripDefaultPort(u.Host, u.Scheme)
+	q := u.Query()
+	for p := range ignoreParams {
+		q.Del(p)
 	}
+	u.RawQuery = q.Encode() // Encode sorts keys alphabetically.
 	buf.WriteString(u.String())
 	buf.WriteString(".")
 	buf.WriteString(req.Method)
@@ -744,8 +764,20 @@ func blobKey(req *http.Request, bodyLimit int64, ignoreHeaders, ignoreParams map
 	buf.WriteString(".")
 	h := sha256.Sum256(buf.Bytes())
 	henc := base64.RawURLEncoding.EncodeToString(h[:])
-	bkey := filepath.Join(req.URL.Hostname(), henc) + ".json"
+	bkey := filepath.Join(strings.ToLower(u.Hostname()), henc) + ".json"
 	return bkey, body, nil
+}
+
+// stripDefaultPort removes :80 for http and :443 for https so that
+// URLs with and without the default port produce the same cache key.
+func stripDefaultPort(host, scheme string) string {
+	switch {
+	case scheme == "http" && strings.HasSuffix(host, ":80"):
+		return strings.TrimSuffix(host, ":80")
+	case scheme == "https" && strings.HasSuffix(host, ":443"):
+		return strings.TrimSuffix(host, ":443")
+	}
+	return host
 }
 
 // archiveKey returns a timestamped key for storing a version snapshot.
