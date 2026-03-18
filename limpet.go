@@ -70,6 +70,7 @@ type Client struct {
 	requestBodyLimit int64 // no limit when <= 0
 	respBodyLimit    int64 // no limit when <= 0
 	ignoreHeaders    map[string]bool
+	ignoreParams     map[string]bool
 	retry            RetryConfig
 	rateLimit        ratelimit.Limiter
 	startedAt        time.Time
@@ -113,6 +114,20 @@ func WithIgnoreHeaders(names ...string) Option {
 		}
 		for _, n := range names {
 			c.ignoreHeaders[http.CanonicalHeaderKey(n)] = true
+		}
+	}
+}
+
+// WithIgnoreParams excludes the named query parameters from cache key
+// computation. Useful for stripping auth tokens, timestamps, or tracking
+// params (utm_source, etc.) that vary between requests to the same resource.
+func WithIgnoreParams(names ...string) Option {
+	return func(c *Client) {
+		if c.ignoreParams == nil {
+			c.ignoreParams = make(map[string]bool)
+		}
+		for _, n := range names {
+			c.ignoreParams[n] = true
 		}
 	}
 }
@@ -679,16 +694,25 @@ func (c *Client) do(
 }
 
 func (c *Client) blobKey(req *http.Request) (string, []byte, error) {
-	return blobKey(req, c.requestBodyLimit, c.ignoreHeaders)
+	return blobKey(req, c.requestBodyLimit, c.ignoreHeaders, c.ignoreParams)
 }
 
 // blobKey computes a deterministic cache key from an HTTP request.
 // The key is SHA-256 of (URL + method + headers + body), placed under the
 // request hostname. bodyLimit limits how much of the request body is read
 // (0 means no limit). The request body is restored after reading.
-func blobKey(req *http.Request, bodyLimit int64, ignoreHeaders map[string]bool) (string, []byte, error) {
+// ignoreHeaders and ignoreParams exclude named headers/query params from the key.
+func blobKey(req *http.Request, bodyLimit int64, ignoreHeaders, ignoreParams map[string]bool) (string, []byte, error) {
 	var buf bytes.Buffer
-	buf.WriteString(req.URL.String())
+	u := *req.URL
+	if len(ignoreParams) > 0 {
+		q := u.Query()
+		for p := range ignoreParams {
+			q.Del(p)
+		}
+		u.RawQuery = q.Encode()
+	}
+	buf.WriteString(u.String())
 	buf.WriteString(".")
 	buf.WriteString(req.Method)
 	buf.WriteString(".")

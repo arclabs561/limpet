@@ -140,6 +140,7 @@ page, _ = cl.Get(ctx, "https://example.com")
 - `limpet.WithRequestBodyLimit(10e6)` -- max request body for cache key (default 10 MB, 0 = no limit)
 - `limpet.WithResponseBodyLimit(100e6)` -- max response body to cache (default 100 MB, 0 = no limit)
 - `limpet.WithIgnoreHeaders("User-Agent", "Accept-Encoding")` -- exclude headers from cache key (different browsers, same cache entry)
+- `limpet.WithIgnoreParams("_t", "token", "utm_source")` -- exclude query params from cache key (auth tokens, tracking params)
 - `limpet.WithRetry(limpet.RetryConfig{Attempts: 3, MinWait: 2 * time.Second})` -- configure retry (zero fields keep defaults: 5 attempts, 1s min, 1m max, 1s jitter)
 
 ### Per-request options (DoConfig)
@@ -247,7 +248,14 @@ ctx := limpet.WithCachePolicy(ctx, limpet.CachePolicyReplace)
 
 // Bypass cache entirely (no read, no write)
 ctx = limpet.WithCachePolicy(ctx, limpet.CachePolicySkip)
+
+// Per-request cache TTL (overrides bucket default)
+ctx = limpet.WithCacheTTL(ctx, 7*24*time.Hour) // weekly
 ```
+
+### Client vs Transport
+
+Use **Transport** when you want transparent caching as a drop-in `http.RoundTripper` for any `http.Client`. Use **Client** when you also need retry with backoff, headless browser rendering, version history, or silent throttle detection. Transport is the caching primitive; Client composes it with higher-level scraping features.
 
 ## License
 

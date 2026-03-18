@@ -169,6 +169,39 @@ func TestBlobKeyIgnoreHeaders(t *testing.T) {
 	}
 }
 
+func TestBlobKeyIgnoreParams(t *testing.T) {
+	c := &Client{
+		ignoreParams: map[string]bool{
+			"_t":         true,
+			"utm_source": true,
+		},
+	}
+
+	// Ignored params should not affect cache key.
+	req1, _ := http.NewRequest("GET", "https://example.com/page?q=foo&_t=123", nil)
+	req2, _ := http.NewRequest("GET", "https://example.com/page?q=foo&_t=999&utm_source=twitter", nil)
+
+	key1, _, _ := c.blobKey(req1)
+	key2, _, _ := c.blobKey(req2)
+	if key1 != key2 {
+		t.Errorf("ignored params changed cache key: %q vs %q", key1, key2)
+	}
+
+	// Non-ignored param should still differentiate.
+	req3, _ := http.NewRequest("GET", "https://example.com/page?q=bar&_t=123", nil)
+	key3, _, _ := c.blobKey(req3)
+	if key1 == key3 {
+		t.Errorf("non-ignored param difference produced same key")
+	}
+
+	// No params at all should still work.
+	req4, _ := http.NewRequest("GET", "https://example.com/page?q=foo", nil)
+	key4, _, _ := c.blobKey(req4)
+	if key1 != key4 {
+		t.Errorf("URL without ignored params should match: %q vs %q", key1, key4)
+	}
+}
+
 func TestArchiveKey(t *testing.T) {
 	ts := time.Date(2026, 3, 16, 21, 30, 45, 0, time.UTC)
 
