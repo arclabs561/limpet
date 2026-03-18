@@ -14,6 +14,12 @@ go test -tags test_all -run TestDoBrowser   # browser test only
 TEST_LIVE_HTTP=true go test -tags test_all  # live HTTP tests
 ```
 
+## Testing conventions
+
+- Prefer `t.Context()` over `context.Background()` and `t.TempDir()` over `os.MkdirTemp()` in tests (Go 1.24+). Reduces boilerplate and ensures cleanup.
+- When upgrading golangci-lint or adding linters, check for deprecation warnings and replace with suggested alternatives.
+- Shared `*Page` (from singleflight or cache) must use `Header.Clone()` when constructing `*http.Response` -- concurrent callers will write to the header map.
+
 ## Accepted trade-offs
 
 - `TestDoBrowser` fails without playwright binaries. Passes in CI.
