@@ -28,6 +28,7 @@ type Transport struct {
 	ignoreHeaders    map[string]bool
 	ignoreParams     map[string]bool
 	cacheStatuses    map[int]bool
+	userAgent        string
 	flight           singleflight.Group
 }
 
@@ -78,6 +79,11 @@ func TransportWithIgnoreParams(names ...string) TransportOption {
 			t.ignoreParams[n] = true
 		}
 	}
+}
+
+// TransportWithUserAgent sets a default User-Agent header on all requests.
+func TransportWithUserAgent(ua string) TransportOption {
+	return func(t *Transport) { t.userAgent = ua }
 }
 
 // TransportWithCacheStatuses sets which HTTP status codes are eligible for
@@ -153,6 +159,11 @@ func cachePolicyFromContext(ctx context.Context) CachePolicy {
 
 // RoundTrip executes a single HTTP transaction with caching.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.userAgent != "" && req.Header.Get("User-Agent") == "" {
+		req = req.Clone(req.Context())
+		req.Header.Set("User-Agent", t.userAgent)
+	}
+
 	policy := cachePolicyFromContext(req.Context())
 
 	key, _, err := blobKey(req, t.requestBodyLimit, t.ignoreHeaders, t.ignoreParams)

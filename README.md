@@ -144,6 +144,7 @@ page, _ = cl.Get(ctx, "https://example.com")
 - `limpet.WithResponseBodyLimit(100e6)` -- max response body to cache (default 100 MB, 0 = no limit)
 - `limpet.WithIgnoreHeaders("User-Agent", "Accept-Encoding")` -- exclude headers from cache key (different browsers, same cache entry)
 - `limpet.WithIgnoreParams("_t", "token", "utm_source")` -- exclude query params from cache key (auth tokens, tracking params)
+- `limpet.WithUserAgent("limpet/0.1")` -- default User-Agent header (applied if not already set)
 - `limpet.WithCacheStatuses(200, 301, 404)` -- cache non-200 responses (default: 200 only)
 - `limpet.WithRetry(limpet.RetryConfig{Attempts: 3, MinWait: 2 * time.Second})` -- configure retry (zero fields keep defaults: 5 attempts, 1s min, 1m max, 1s jitter)
 
