@@ -37,10 +37,14 @@ type Transport struct {
 // TransportStats tracks cache performance counters. All fields are safe for
 // concurrent access. Read via Transport.Stats().
 type TransportStats struct {
-	Hits        atomic.Int64 // Cache hits (served from cache without fetch)
-	Misses      atomic.Int64 // Cache misses (required a fetch)
-	Revalidated atomic.Int64 // Conditional requests that returned 304
-	Coalesced   atomic.Int64 // Requests served by singleflight coalescing
+	// Hits counts cache hits (served from cache without fetch).
+	Hits atomic.Int64
+	// Misses counts cache misses (required a fetch).
+	Misses atomic.Int64
+	// Revalidated counts conditional requests that returned 304.
+	Revalidated atomic.Int64
+	// Coalesced counts requests served by singleflight coalescing.
+	Coalesced atomic.Int64
 }
 
 // TransportOption configures a Transport.
@@ -200,21 +204,18 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("limpet: failed to compute cache key: %w", err)
 	}
 
-	// Cache read.
+	// Single cache read: return on hit (Default policy), or keep for
+	// conditional request headers (Replace policy).
 	var cachedPage *Page
-	if policy == CachePolicyDefault {
-		resp, err := t.cacheRead(req.Context(), key)
-		if err == nil {
-			t.stats.Hits.Add(1)
-			return resp, nil
-		}
-		t.stats.Misses.Add(1)
-	}
-
-	// For Replace policy or cache miss, try conditional request if we have
-	// a cached version with ETag or Last-Modified.
 	if policy != CachePolicySkip {
 		if page, err := readCachedPage(req.Context(), t.bucket, key); err == nil {
+			if policy == CachePolicyDefault {
+				t.stats.Hits.Add(1)
+				resp := page.HTTPResponse()
+				resp.Header.Set("X-Limpet-Source", page.Meta.Source)
+				return resp, nil
+			}
+			// Replace: keep cached page for conditional request headers.
 			cachedPage = page
 			if etag := page.Response.Header.Get("ETag"); etag != "" {
 				req = req.Clone(req.Context())
@@ -223,6 +224,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				req = req.Clone(req.Context())
 				req.Header.Set("If-Modified-Since", lm)
 			}
+		} else if policy == CachePolicyDefault {
+			t.stats.Misses.Add(1)
 		}
 	}
 
@@ -287,16 +290,6 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	resp := result.page.HTTPResponse()
 	resp.Header.Set("X-Limpet-Source", result.source)
-	return resp, nil
-}
-
-func (t *Transport) cacheRead(ctx context.Context, key string) (*http.Response, error) {
-	page, err := readCachedPage(ctx, t.bucket, key)
-	if err != nil {
-		return nil, err
-	}
-	resp := page.HTTPResponse()
-	resp.Header.Set("X-Limpet-Source", page.Meta.Source)
 	return resp, nil
 }
 
