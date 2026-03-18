@@ -2,6 +2,7 @@ package blob
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -31,13 +32,18 @@ func setupBucket(t *testing.T) *Bucket {
 	return bucket
 }
 
+func mustSet(t *testing.T, bu *Bucket, ctx context.Context, key string, data []byte) {
+	t.Helper()
+	if err := bu.SetBlob(ctx, key, data); err != nil {
+		t.Fatalf("SetBlob(%q): %v", key, err)
+	}
+}
+
 func TestSetGetBlob(t *testing.T) {
 	bu := setupBucket(t)
 	ctx := context.Background()
 
-	if err := bu.SetBlob(ctx, "test/key1", []byte("hello")); err != nil {
-		t.Fatalf("SetBlob: %v", err)
-	}
+	mustSet(t, bu, ctx, "test/key1", []byte("hello"))
 
 	b, err := bu.GetBlob(ctx, "test/key1")
 	if err != nil {
@@ -60,24 +66,16 @@ func TestGetBlobNotFound(t *testing.T) {
 		t.Fatal("expected error for missing key")
 	}
 	var nf *NotFoundError
-	if !isNotFoundError(err, &nf) {
+	if !errors.As(err, &nf) {
 		t.Errorf("expected NotFoundError, got %T: %v", err, err)
 	}
-}
-
-func isNotFoundError(err error, target **NotFoundError) bool {
-	nf, ok := err.(*NotFoundError)
-	if ok {
-		*target = nf
-	}
-	return ok
 }
 
 func TestDeleteBlob(t *testing.T) {
 	bu := setupBucket(t)
 	ctx := context.Background()
 
-	bu.SetBlob(ctx, "test/del", []byte("data"))
+	mustSet(t, bu, ctx, "test/del", []byte("data"))
 
 	if err := bu.DeleteBlob(ctx, "test/del"); err != nil {
 		t.Fatalf("DeleteBlob: %v", err)
@@ -103,9 +101,9 @@ func TestListCache(t *testing.T) {
 	bu := setupBucket(t)
 	ctx := context.Background()
 
-	bu.SetBlob(ctx, "host/a", []byte("1"))
-	bu.SetBlob(ctx, "host/b", []byte("2"))
-	bu.SetBlob(ctx, "other/c", []byte("3"))
+	mustSet(t, bu, ctx, "host/a", []byte("1"))
+	mustSet(t, bu, ctx, "host/b", []byte("2"))
+	mustSet(t, bu, ctx, "other/c", []byte("3"))
 
 	entries, err := bu.ListCache("host/")
 	if err != nil {
@@ -128,9 +126,9 @@ func TestPurgeCache(t *testing.T) {
 	bu := setupBucket(t)
 	ctx := context.Background()
 
-	bu.SetBlob(ctx, "host/a", []byte("1"))
-	bu.SetBlob(ctx, "host/b", []byte("2"))
-	bu.SetBlob(ctx, "other/c", []byte("3"))
+	mustSet(t, bu, ctx, "host/a", []byte("1"))
+	mustSet(t, bu, ctx, "host/b", []byte("2"))
+	mustSet(t, bu, ctx, "other/c", []byte("3"))
 
 	n, err := bu.PurgeCache("host/")
 	if err != nil {
@@ -140,8 +138,10 @@ func TestPurgeCache(t *testing.T) {
 		t.Errorf("purged %d, want 2", n)
 	}
 
-	// "other/c" should still exist.
-	remaining, _ := bu.ListCache("")
+	remaining, err := bu.ListCache("")
+	if err != nil {
+		t.Fatalf("ListCache: %v", err)
+	}
 	if len(remaining) != 1 {
 		t.Errorf("remaining = %d, want 1", len(remaining))
 	}
@@ -151,8 +151,8 @@ func TestPurgeCacheAll(t *testing.T) {
 	bu := setupBucket(t)
 	ctx := context.Background()
 
-	bu.SetBlob(ctx, "a", []byte("1"))
-	bu.SetBlob(ctx, "b", []byte("2"))
+	mustSet(t, bu, ctx, "a", []byte("1"))
+	mustSet(t, bu, ctx, "b", []byte("2"))
 
 	n, err := bu.PurgeCache("")
 	if err != nil {
@@ -167,14 +167,10 @@ func TestWithCacheTTL(t *testing.T) {
 	bu := setupBucket(t)
 	ctx := context.Background()
 
-	// Write with a very short TTL.
 	shortCtx := WithCacheTTL(ctx, 1*time.Millisecond)
-	bu.SetBlob(shortCtx, "ttl/short", []byte("ephemeral"))
+	mustSet(t, bu, shortCtx, "ttl/short", []byte("ephemeral"))
+	mustSet(t, bu, ctx, "ttl/default", []byte("normal"))
 
-	// Write with no TTL override.
-	bu.SetBlob(ctx, "ttl/default", []byte("normal"))
-
-	// Both should be readable immediately.
 	b1, err := bu.GetBlob(ctx, "ttl/short")
 	if err != nil {
 		t.Fatalf("GetBlob short: %v", err)
@@ -206,7 +202,6 @@ func TestNoCacheBucket(t *testing.T) {
 	}
 	defer bu.Close()
 
-	// Write and read back (goes through remote only, no local cache).
 	if err := bu.SetBlob(ctx, "nc/key", []byte("data")); err != nil {
 		t.Fatalf("SetBlob: %v", err)
 	}
@@ -221,7 +216,6 @@ func TestNoCacheBucket(t *testing.T) {
 		t.Errorf("Source = %q, want remote", b.Source)
 	}
 
-	// ListCache should return nil when cache is disabled.
 	entries, err := bu.ListCache("")
 	if err != nil {
 		t.Fatalf("ListCache: %v", err)

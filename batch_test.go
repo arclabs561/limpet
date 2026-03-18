@@ -2,6 +2,7 @@ package limpet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,7 +17,7 @@ func TestGetMany(t *testing.T) {
 
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte("ok:" + r.URL.Path))
+		_, _ = w.Write([]byte("ok:" + r.URL.Path))
 	}))
 	t.Cleanup(svr.Close)
 
@@ -71,7 +72,7 @@ func TestGetManyRespectsConcurrency(t *testing.T) {
 		}
 		// Yield to let other goroutines run, making overlap more likely.
 		// No sleep -- just a non-trivial response body.
-		w.Write([]byte("data"))
+		_, _ = w.Write([]byte("data"))
 		inflight.Add(-1)
 	}))
 	t.Cleanup(svr.Close)
@@ -99,7 +100,7 @@ func TestGetManyCallbackError(t *testing.T) {
 	var served atomic.Int32
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		served.Add(1)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	}))
 	t.Cleanup(svr.Close)
 
@@ -124,7 +125,7 @@ func TestGetManyCallbackError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from GetMany, got nil")
 	}
-	if err != sentinel {
+	if !errors.Is(err, sentinel) {
 		t.Errorf("got error %v, want sentinel", err)
 	}
 	// With concurrency=1 and early cancel, we should not have fetched all 50.

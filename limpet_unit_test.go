@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -104,7 +105,7 @@ func TestBlobKey(t *testing.T) {
 			t.Fatal("empty key")
 		}
 		// Key should start with hostname
-		if !bytes.HasPrefix([]byte(key), []byte("example.com/")) {
+		if !strings.HasPrefix(key, "example.com/") {
 			t.Errorf("key %q does not start with hostname", key)
 		}
 	})

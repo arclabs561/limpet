@@ -21,7 +21,7 @@ func TestProxyHTTP(t *testing.T) {
 
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte("hello from origin"))
+		_, _ = w.Write([]byte("hello from origin"))
 	}))
 	t.Cleanup(origin.Close)
 
@@ -62,7 +62,7 @@ func TestProxyHTTPNon200(t *testing.T) {
 
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte("not found"))
+		_, _ = w.Write([]byte("not found"))
 	}))
 	t.Cleanup(origin.Close)
 
@@ -107,6 +107,7 @@ func TestProxyCONNECTBlocksLoopback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
+	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
 	}
@@ -128,6 +129,7 @@ func TestProxyCONNECTBlocksPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
+	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
 	}

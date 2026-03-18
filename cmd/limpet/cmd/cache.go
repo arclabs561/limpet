@@ -79,7 +79,9 @@ func cacheLsRunE(cmd *cobra.Command, args []string) error {
 	if asJSON {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		for _, e := range entries {
-			enc.Encode(e)
+			if err := enc.Encode(e); err != nil {
+				return fmt.Errorf("failed to encode entry: %w", err)
+			}
 		}
 		return nil
 	}
