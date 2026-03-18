@@ -9,9 +9,11 @@ A Go library and CLI for fetching web pages with automatic caching. Supports pla
 
 - **HTTP + headless browser**: fetch pages via standard HTTP or Playwright-driven Chromium
 - **Blob storage**: cache fetched pages to local filesystem or S3
-- **Deterministic cache keys**: same URL+method+headers+body maps to a SHA-256 blob key
+- **Deterministic cache keys**: normalized URL+method+headers+body maps to a SHA-256 blob key, with options to exclude headers and query params
+- **Conditional requests**: automatic ETag/If-Modified-Since revalidation in Transport avoids re-downloading unchanged content
 - **Version history**: archive timestamped snapshots and diff pages to detect changes
 - **Staleness hints**: check HTTP cache headers or time-based age via `Page.Stale()` / `Page.StaleAfter()`
+- **Per-request cache TTL**: override the default TTL per request via context
 - **Rate limiting**: configurable per-request rate limits with exponential backoff
 - **Silent throttle detection**: detect and retry when a site silently serves captcha/block pages
 - **HTTP proxy mode**: caching HTTP proxy with HTTPS CONNECT tunneling (SSRF-safe)
@@ -141,6 +143,7 @@ page, _ = cl.Get(ctx, "https://example.com")
 - `limpet.WithResponseBodyLimit(100e6)` -- max response body to cache (default 100 MB, 0 = no limit)
 - `limpet.WithIgnoreHeaders("User-Agent", "Accept-Encoding")` -- exclude headers from cache key (different browsers, same cache entry)
 - `limpet.WithIgnoreParams("_t", "token", "utm_source")` -- exclude query params from cache key (auth tokens, tracking params)
+- `limpet.WithCacheStatuses(200, 301, 404)` -- cache non-200 responses (default: 200 only)
 - `limpet.WithRetry(limpet.RetryConfig{Attempts: 3, MinWait: 2 * time.Second})` -- configure retry (zero fields keep defaults: 5 attempts, 1s min, 1m max, 1s jitter)
 
 ### Per-request options (DoConfig)
@@ -237,7 +240,7 @@ client := &http.Client{Transport: tr}
 
 // First call fetches and caches. Second call returns from cache.
 resp, _ := client.Get("https://example.com")
-// resp.Header.Get("X-Limpet-Source") == "fetch" or "cache"
+// resp.Header.Get("X-Limpet-Source") == "fetch", "cache", or "revalidated"
 ```
 
 Per-request cache control via context:
