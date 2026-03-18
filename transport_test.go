@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -260,5 +261,61 @@ func TestTransportConditionalETag(t *testing.T) {
 	}
 	if hits.Load() != 2 {
 		t.Errorf("server hits = %d, want 2", hits.Load())
+	}
+}
+
+func TestTransportSingleflight(t *testing.T) {
+	tr, _ := setupTransport(t)
+
+	var hits atomic.Int32
+	gate := make(chan struct{}) // holds the server response until released
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		<-gate // block until test releases
+		w.Write([]byte("shared"))
+	}))
+	t.Cleanup(svr.Close)
+
+	client := &http.Client{Transport: tr}
+	const n = 5
+	var wg sync.WaitGroup
+	bodies := make([]string, n)
+	errs := make([]error, n)
+
+	// Launch n concurrent requests for the same URL.
+	for i := range n {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			ctx := WithCachePolicy(context.Background(), CachePolicyReplace)
+			req, _ := http.NewRequestWithContext(ctx, "GET", svr.URL+"/dedup", nil)
+			resp, err := client.Do(req)
+			if err != nil {
+				errs[idx] = err
+				return
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			bodies[idx] = string(body)
+		}(i)
+	}
+
+	// Release the server after a moment.
+	close(gate)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+	}
+	for i, body := range bodies {
+		if body != "shared" {
+			t.Errorf("request %d body = %q, want shared", i, body)
+		}
+	}
+	// Singleflight should coalesce into 1 server hit.
+	if h := hits.Load(); h != 1 {
+		t.Errorf("server hits = %d, want 1 (singleflight should coalesce)", h)
 	}
 }

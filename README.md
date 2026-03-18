@@ -11,6 +11,7 @@ A Go library and CLI for fetching web pages with automatic caching. Supports pla
 - **Blob storage**: cache fetched pages to local filesystem or S3
 - **Deterministic cache keys**: normalized URL+method+headers+body maps to a SHA-256 blob key, with options to exclude headers and query params
 - **Conditional requests**: automatic ETag/If-Modified-Since revalidation in Transport avoids re-downloading unchanged content
+- **Request deduplication**: concurrent Transport requests for the same URL coalesce via singleflight
 - **Version history**: archive timestamped snapshots and diff pages to detect changes
 - **Staleness hints**: check HTTP cache headers or time-based age via `Page.Stale()` / `Page.StaleAfter()`
 - **Per-request cache TTL**: override the default TTL per request via context
