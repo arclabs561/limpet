@@ -13,6 +13,27 @@ import (
 	"github.com/arclabs561/limpet/blob"
 )
 
+func setupTransportBucket(t *testing.T) *blob.Bucket {
+	t.Helper()
+	ctx := context.Background()
+	bucketDir, err := os.MkdirTemp("", "limpet-transport-bucket-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(bucketDir) })
+	cacheDir, err := os.MkdirTemp("", "limpet-transport-cache-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(cacheDir) })
+	bucket, err := blob.NewBucket(ctx, bucketDir, &blob.BucketConfig{CacheDir: cacheDir})
+	if err != nil {
+		t.Fatalf("failed to create bucket: %v", err)
+	}
+	t.Cleanup(func() { bucket.Close() })
+	return bucket
+}
+
 func setupTransport(t *testing.T) (*Transport, *blob.Bucket) {
 	t.Helper()
 	ctx := context.Background()
@@ -317,5 +338,100 @@ func TestTransportSingleflight(t *testing.T) {
 	// Singleflight should coalesce into 1 server hit.
 	if h := hits.Load(); h != 1 {
 		t.Errorf("server hits = %d, want 1 (singleflight should coalesce)", h)
+	}
+}
+
+func TestTransportStats(t *testing.T) {
+	tr, _ := setupTransport(t)
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("data"))
+	}))
+	t.Cleanup(svr.Close)
+
+	client := &http.Client{Transport: tr}
+
+	// Miss + fetch.
+	resp, _ := client.Get(svr.URL + "/stats")
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Hit.
+	resp, _ = client.Get(svr.URL + "/stats")
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	s := tr.Stats()
+	if s.Hits != 1 {
+		t.Errorf("hits = %d, want 1", s.Hits)
+	}
+	if s.Misses != 1 {
+		t.Errorf("misses = %d, want 1", s.Misses)
+	}
+}
+
+func TestTransportUserAgent(t *testing.T) {
+	tr, _ := setupTransport(t)
+	tr = NewTransport(tr.bucket, TransportWithUserAgent("limpet-test/1.0"))
+
+	var gotUA string
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		w.Write([]byte("ok"))
+	}))
+	t.Cleanup(svr.Close)
+
+	client := &http.Client{Transport: tr}
+	ctx := WithCachePolicy(context.Background(), CachePolicySkip)
+	req, _ := http.NewRequestWithContext(ctx, "GET", svr.URL+"/ua", nil)
+	resp, _ := client.Do(req)
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if gotUA != "limpet-test/1.0" {
+		t.Errorf("User-Agent = %q, want limpet-test/1.0", gotUA)
+	}
+
+	// Caller-set UA should not be overridden.
+	req2, _ := http.NewRequestWithContext(ctx, "GET", svr.URL+"/ua2", nil)
+	req2.Header.Set("User-Agent", "custom/2.0")
+	resp, _ = client.Do(req2)
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if gotUA != "custom/2.0" {
+		t.Errorf("caller UA overridden: got %q, want custom/2.0", gotUA)
+	}
+}
+
+func TestTransportCacheStatuses(t *testing.T) {
+	bucket := setupTransportBucket(t)
+	tr := NewTransport(bucket, TransportWithCacheStatuses(200, 404))
+
+	var hits atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(404)
+		w.Write([]byte("not found"))
+	}))
+	t.Cleanup(svr.Close)
+
+	client := &http.Client{Transport: tr}
+
+	// First: 404, should be cached.
+	resp, _ := client.Get(svr.URL + "/cached404")
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Second: should come from cache.
+	resp, _ = client.Get(svr.URL + "/cached404")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if hits.Load() != 1 {
+		t.Errorf("server hits = %d, want 1 (404 should be cached)", hits.Load())
+	}
+	if string(body) != "not found" {
+		t.Errorf("body = %q, want 'not found'", body)
 	}
 }
