@@ -1,30 +1,14 @@
 package blob
 
 import (
-	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 )
 
 func setupBucket(t *testing.T) *Bucket {
 	t.Helper()
-	ctx := context.Background()
-
-	bucketDir, err := os.MkdirTemp("", "limpet-blob-bucket-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(bucketDir) })
-
-	cacheDir, err := os.MkdirTemp("", "limpet-blob-cache-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(cacheDir) })
-
-	bucket, err := NewBucket(ctx, bucketDir, &BucketConfig{CacheDir: cacheDir})
+	bucket, err := NewBucket(t.Context(), t.TempDir(), &BucketConfig{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
@@ -32,20 +16,19 @@ func setupBucket(t *testing.T) *Bucket {
 	return bucket
 }
 
-func mustSet(t *testing.T, bu *Bucket, ctx context.Context, key string, data []byte) {
+func mustSet(t *testing.T, bu *Bucket, key string, data []byte) {
 	t.Helper()
-	if err := bu.SetBlob(ctx, key, data); err != nil {
+	if err := bu.SetBlob(t.Context(), key, data); err != nil {
 		t.Fatalf("SetBlob(%q): %v", key, err)
 	}
 }
 
 func TestSetGetBlob(t *testing.T) {
 	bu := setupBucket(t)
-	ctx := context.Background()
 
-	mustSet(t, bu, ctx, "test/key1", []byte("hello"))
+	mustSet(t, bu, "test/key1", []byte("hello"))
 
-	b, err := bu.GetBlob(ctx, "test/key1")
+	b, err := bu.GetBlob(t.Context(), "test/key1")
 	if err != nil {
 		t.Fatalf("GetBlob: %v", err)
 	}
@@ -59,9 +42,8 @@ func TestSetGetBlob(t *testing.T) {
 
 func TestGetBlobNotFound(t *testing.T) {
 	bu := setupBucket(t)
-	ctx := context.Background()
 
-	_, err := bu.GetBlob(ctx, "nonexistent")
+	_, err := bu.GetBlob(t.Context(), "nonexistent")
 	if err == nil {
 		t.Fatal("expected error for missing key")
 	}
@@ -73,15 +55,14 @@ func TestGetBlobNotFound(t *testing.T) {
 
 func TestDeleteBlob(t *testing.T) {
 	bu := setupBucket(t)
-	ctx := context.Background()
 
-	mustSet(t, bu, ctx, "test/del", []byte("data"))
+	mustSet(t, bu, "test/del", []byte("data"))
 
-	if err := bu.DeleteBlob(ctx, "test/del"); err != nil {
+	if err := bu.DeleteBlob(t.Context(), "test/del"); err != nil {
 		t.Fatalf("DeleteBlob: %v", err)
 	}
 
-	_, err := bu.GetBlob(ctx, "test/del")
+	_, err := bu.GetBlob(t.Context(), "test/del")
 	if err == nil {
 		t.Fatal("expected not found after delete")
 	}
@@ -89,21 +70,19 @@ func TestDeleteBlob(t *testing.T) {
 
 func TestDeleteBlobNotFound(t *testing.T) {
 	bu := setupBucket(t)
-	ctx := context.Background()
 
 	// Should not error on missing key.
-	if err := bu.DeleteBlob(ctx, "nonexistent"); err != nil {
+	if err := bu.DeleteBlob(t.Context(), "nonexistent"); err != nil {
 		t.Fatalf("DeleteBlob on missing key: %v", err)
 	}
 }
 
 func TestListCache(t *testing.T) {
 	bu := setupBucket(t)
-	ctx := context.Background()
 
-	mustSet(t, bu, ctx, "host/a", []byte("1"))
-	mustSet(t, bu, ctx, "host/b", []byte("2"))
-	mustSet(t, bu, ctx, "other/c", []byte("3"))
+	mustSet(t, bu, "host/a", []byte("1"))
+	mustSet(t, bu, "host/b", []byte("2"))
+	mustSet(t, bu, "other/c", []byte("3"))
 
 	entries, err := bu.ListCache("host/")
 	if err != nil {
@@ -124,11 +103,10 @@ func TestListCache(t *testing.T) {
 
 func TestPurgeCache(t *testing.T) {
 	bu := setupBucket(t)
-	ctx := context.Background()
 
-	mustSet(t, bu, ctx, "host/a", []byte("1"))
-	mustSet(t, bu, ctx, "host/b", []byte("2"))
-	mustSet(t, bu, ctx, "other/c", []byte("3"))
+	mustSet(t, bu, "host/a", []byte("1"))
+	mustSet(t, bu, "host/b", []byte("2"))
+	mustSet(t, bu, "other/c", []byte("3"))
 
 	n, err := bu.PurgeCache("host/")
 	if err != nil {
@@ -149,10 +127,9 @@ func TestPurgeCache(t *testing.T) {
 
 func TestPurgeCacheAll(t *testing.T) {
 	bu := setupBucket(t)
-	ctx := context.Background()
 
-	mustSet(t, bu, ctx, "a", []byte("1"))
-	mustSet(t, bu, ctx, "b", []byte("2"))
+	mustSet(t, bu, "a", []byte("1"))
+	mustSet(t, bu, "b", []byte("2"))
 
 	n, err := bu.PurgeCache("")
 	if err != nil {
@@ -165,13 +142,14 @@ func TestPurgeCacheAll(t *testing.T) {
 
 func TestWithCacheTTL(t *testing.T) {
 	bu := setupBucket(t)
-	ctx := context.Background()
 
-	shortCtx := WithCacheTTL(ctx, 1*time.Millisecond)
-	mustSet(t, bu, shortCtx, "ttl/short", []byte("ephemeral"))
-	mustSet(t, bu, ctx, "ttl/default", []byte("normal"))
+	shortCtx := WithCacheTTL(t.Context(), 1*time.Millisecond)
+	if err := bu.SetBlob(shortCtx, "ttl/short", []byte("ephemeral")); err != nil {
+		t.Fatalf("SetBlob short: %v", err)
+	}
+	mustSet(t, bu, "ttl/default", []byte("normal"))
 
-	b1, err := bu.GetBlob(ctx, "ttl/short")
+	b1, err := bu.GetBlob(t.Context(), "ttl/short")
 	if err != nil {
 		t.Fatalf("GetBlob short: %v", err)
 	}
@@ -179,7 +157,7 @@ func TestWithCacheTTL(t *testing.T) {
 		t.Errorf("short data = %q", b1.Data)
 	}
 
-	b2, err := bu.GetBlob(ctx, "ttl/default")
+	b2, err := bu.GetBlob(t.Context(), "ttl/default")
 	if err != nil {
 		t.Fatalf("GetBlob default: %v", err)
 	}
@@ -189,23 +167,16 @@ func TestWithCacheTTL(t *testing.T) {
 }
 
 func TestNoCacheBucket(t *testing.T) {
-	ctx := context.Background()
-	bucketDir, err := os.MkdirTemp("", "limpet-blob-nocache-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(bucketDir) })
-
-	bu, err := NewBucket(ctx, bucketDir, &BucketConfig{NoCache: true})
+	bu, err := NewBucket(t.Context(), t.TempDir(), &BucketConfig{NoCache: true})
 	if err != nil {
 		t.Fatalf("NewBucket: %v", err)
 	}
 	defer bu.Close()
 
-	if err := bu.SetBlob(ctx, "nc/key", []byte("data")); err != nil {
+	if err := bu.SetBlob(t.Context(), "nc/key", []byte("data")); err != nil {
 		t.Fatalf("SetBlob: %v", err)
 	}
-	b, err := bu.GetBlob(ctx, "nc/key")
+	b, err := bu.GetBlob(t.Context(), "nc/key")
 	if err != nil {
 		t.Fatalf("GetBlob: %v", err)
 	}

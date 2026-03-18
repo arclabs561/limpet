@@ -1,11 +1,9 @@
 package limpet
 
 import (
-	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,18 +13,7 @@ import (
 
 func setupTransportBucket(t *testing.T) *blob.Bucket {
 	t.Helper()
-	ctx := context.Background()
-	bucketDir, err := os.MkdirTemp("", "limpet-transport-bucket-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(bucketDir) })
-	cacheDir, err := os.MkdirTemp("", "limpet-transport-cache-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(cacheDir) })
-	bucket, err := blob.NewBucket(ctx, bucketDir, &blob.BucketConfig{CacheDir: cacheDir})
+	bucket, err := blob.NewBucket(t.Context(), t.TempDir(), &blob.BucketConfig{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("failed to create bucket: %v", err)
 	}
@@ -36,26 +23,7 @@ func setupTransportBucket(t *testing.T) *blob.Bucket {
 
 func setupTransport(t *testing.T) (*Transport, *blob.Bucket) {
 	t.Helper()
-	ctx := context.Background()
-
-	bucketDir, err := os.MkdirTemp("", "limpet-transport-bucket-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(bucketDir) })
-
-	cacheDir, err := os.MkdirTemp("", "limpet-transport-cache-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(cacheDir) })
-
-	bucket, err := blob.NewBucket(ctx, bucketDir, &blob.BucketConfig{CacheDir: cacheDir})
-	if err != nil {
-		t.Fatalf("failed to create bucket: %v", err)
-	}
-	t.Cleanup(func() { bucket.Close() })
-
+	bucket := setupTransportBucket(t)
 	tr := NewTransport(bucket)
 	return tr, bucket
 }
@@ -129,7 +97,7 @@ func TestTransportCachePolicyReplace(t *testing.T) {
 	resp.Body.Close()
 
 	// Replace: should hit server even though cached.
-	ctx := WithCachePolicy(context.Background(), CachePolicyReplace)
+	ctx := WithCachePolicy(t.Context(), CachePolicyReplace)
 	req, _ := http.NewRequestWithContext(ctx, "GET", svr.URL, nil)
 	resp, err = client.Do(req)
 	if err != nil {
@@ -156,7 +124,7 @@ func TestTransportCachePolicySkip(t *testing.T) {
 	client := &http.Client{Transport: tr}
 
 	// Skip: should not write to cache.
-	ctx := WithCachePolicy(context.Background(), CachePolicySkip)
+	ctx := WithCachePolicy(t.Context(), CachePolicySkip)
 	req, _ := http.NewRequestWithContext(ctx, "GET", svr.URL, nil)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -266,7 +234,7 @@ func TestTransportConditionalETag(t *testing.T) {
 	}
 
 	// Replace request: server returns 304, should get cached body back.
-	ctx := WithCachePolicy(context.Background(), CachePolicyReplace)
+	ctx := WithCachePolicy(t.Context(), CachePolicyReplace)
 	req, _ := http.NewRequestWithContext(ctx, "GET", svr.URL+"/etag", nil)
 	resp, err = client.Do(req)
 	if err != nil {
@@ -308,7 +276,7 @@ func TestTransportSingleflight(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			ctx := WithCachePolicy(context.Background(), CachePolicyReplace)
+			ctx := WithCachePolicy(t.Context(), CachePolicyReplace)
 			req, _ := http.NewRequestWithContext(ctx, "GET", svr.URL+"/dedup", nil)
 			resp, err := client.Do(req)
 			if err != nil {
@@ -382,7 +350,7 @@ func TestTransportUserAgent(t *testing.T) {
 	t.Cleanup(svr.Close)
 
 	client := &http.Client{Transport: tr}
-	ctx := WithCachePolicy(context.Background(), CachePolicySkip)
+	ctx := WithCachePolicy(t.Context(), CachePolicySkip)
 	req, _ := http.NewRequestWithContext(ctx, "GET", svr.URL+"/ua", nil)
 	resp, _ := client.Do(req)
 	_, _ = io.ReadAll(resp.Body)

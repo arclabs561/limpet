@@ -6,7 +6,7 @@ linters:
   - durationcheck
   - errname
   - errorlint
-  - exportloopref
+  - copyloopvar
   - gocheckcompilerdirectives
   - importas
   - makezero
@@ -15,7 +15,7 @@ linters:
   - musttag
   - nilnil
   - revive
-  - tenv
+  - usetesting
   - thelper
   - tparallel
   - unconvert
