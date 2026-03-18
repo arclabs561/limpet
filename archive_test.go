@@ -1,10 +1,8 @@
 package limpet
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"sync/atomic"
 	"testing"
 
@@ -13,27 +11,13 @@ import (
 
 func setupClient(t *testing.T) *Client {
 	t.Helper()
-	ctx := context.Background()
-
-	bucketDir, err := os.MkdirTemp("", "limpet-archive-bucket-*")
-	if err != nil {
-		t.Fatalf("mkdtemp: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(bucketDir) })
-
-	cacheDir, err := os.MkdirTemp("", "limpet-archive-cache-*")
-	if err != nil {
-		t.Fatalf("mkdtemp: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(cacheDir) })
-
-	bucket, err := blob.NewBucket(ctx, bucketDir, &blob.BucketConfig{CacheDir: cacheDir})
+	bucket, err := blob.NewBucket(t.Context(), t.TempDir(), &blob.BucketConfig{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new bucket: %v", err)
 	}
 	t.Cleanup(func() { bucket.Close() })
 
-	cl, err := NewClient(ctx, bucket)
+	cl, err := NewClient(t.Context(), bucket)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -44,7 +28,7 @@ func setupClient(t *testing.T) *Client {
 
 func TestArchiveAndVersions(t *testing.T) {
 	cl := setupClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var counter atomic.Int32
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -121,7 +105,7 @@ func TestArchiveAndVersions(t *testing.T) {
 
 func TestArchiveNotWrittenWithoutFlag(t *testing.T) {
 	cl := setupClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("data"))
@@ -148,7 +132,7 @@ func TestArchiveNotWrittenWithoutFlag(t *testing.T) {
 
 func TestDiffIdentical(t *testing.T) {
 	cl := setupClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("static"))

@@ -2,13 +2,11 @@ package cmd
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -171,27 +169,13 @@ type proxyState struct {
 func setupProxy(t *testing.T) proxyState {
 	t.Helper()
 
-	ctx := context.Background()
-
-	bucketDir, err := os.MkdirTemp("", "limpet-proxy-bucket-*")
-	if err != nil {
-		t.Fatalf("mkdtemp: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(bucketDir) })
-
-	cacheDir, err := os.MkdirTemp("", "limpet-proxy-cache-*")
-	if err != nil {
-		t.Fatalf("mkdtemp: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(cacheDir) })
-
-	bucket, err := blob.NewBucket(ctx, bucketDir, &blob.BucketConfig{CacheDir: cacheDir})
+	bucket, err := blob.NewBucket(t.Context(), t.TempDir(), &blob.BucketConfig{CacheDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("new bucket: %v", err)
 	}
 	t.Cleanup(func() { bucket.Close() })
 
-	cl, err := limpet.NewClient(ctx, bucket)
+	cl, err := limpet.NewClient(t.Context(), bucket)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -203,7 +187,7 @@ func setupProxy(t *testing.T) proxyState {
 		t.Fatalf("listen: %v", err)
 	}
 
-	target := &proxyTarget{ctx: ctx, cl: cl}
+	target := &proxyTarget{ctx: t.Context(), cl: cl}
 
 	// Accept connections in the background.
 	go func() {

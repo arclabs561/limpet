@@ -1,7 +1,6 @@
 package limpet
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,7 +12,7 @@ import (
 
 func TestGetMany(t *testing.T) {
 	cl := setupClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -54,7 +53,7 @@ func TestGetMany(t *testing.T) {
 
 func TestGetManyRespectsConcurrency(t *testing.T) {
 	cl := setupClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	const maxConcurrency = 2
 
@@ -95,7 +94,7 @@ func TestGetManyRespectsConcurrency(t *testing.T) {
 
 func TestGetManyCallbackError(t *testing.T) {
 	cl := setupClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var served atomic.Int32
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +135,7 @@ func TestGetManyCallbackError(t *testing.T) {
 
 func TestGetManyEmptyURLs(t *testing.T) {
 	cl := setupClient(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	err := cl.GetMany(ctx, nil, 3, DoConfig{}, func(_ string, _ *Page, _ error) error {
 		t.Fatal("callback should not be called for empty URLs")
