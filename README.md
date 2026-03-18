@@ -108,9 +108,12 @@ Page
 |   +-- Body
 +-- Response
     +-- StatusCode
+    +-- ProtoMajor, ProtoMinor
     +-- Header
     +-- Body
     +-- ContentLength
+    +-- TransferEncoding
+    +-- Trailer
 ```
 
 ## Library Usage
