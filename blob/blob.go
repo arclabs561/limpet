@@ -308,9 +308,9 @@ func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) 
 
 // CacheEntry represents a cached blob key with optional metadata.
 type CacheEntry struct {
-	Key       string
-	Size      int64
-	ExpiresAt uint64 // Unix timestamp, 0 means no expiry
+	Key       string `json:"key"`
+	Size      int64  `json:"size"`
+	ExpiresAt uint64 `json:"expires_at"` // Unix timestamp, 0 means no expiry
 }
 
 // ListCache iterates all keys in the local badger cache.

@@ -67,7 +67,7 @@ func TestTransportCacheHitMiss(t *testing.T) {
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte("hello"))
+		_, _ = w.Write([]byte("hello"))
 	}))
 	t.Cleanup(svr.Close)
 
@@ -114,7 +114,7 @@ func TestTransportCachePolicyReplace(t *testing.T) {
 	var hits atomic.Int32
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		w.Write([]byte("fresh"))
+		_, _ = w.Write([]byte("fresh"))
 	}))
 	t.Cleanup(svr.Close)
 
@@ -125,7 +125,7 @@ func TestTransportCachePolicyReplace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("populate: %v", err)
 	}
-	io.ReadAll(resp.Body)
+	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	// Replace: should hit server even though cached.
@@ -135,7 +135,7 @@ func TestTransportCachePolicyReplace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replace request: %v", err)
 	}
-	io.ReadAll(resp.Body)
+	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	if hits.Load() != 2 {
@@ -149,7 +149,7 @@ func TestTransportCachePolicySkip(t *testing.T) {
 	var hits atomic.Int32
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		w.Write([]byte("data"))
+		_, _ = w.Write([]byte("data"))
 	}))
 	t.Cleanup(svr.Close)
 
@@ -162,7 +162,7 @@ func TestTransportCachePolicySkip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("skip request: %v", err)
 	}
-	io.ReadAll(resp.Body)
+	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	// Second request with default policy: should hit server (nothing cached).
@@ -170,7 +170,7 @@ func TestTransportCachePolicySkip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("default request: %v", err)
 	}
-	io.ReadAll(resp.Body)
+	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	if hits.Load() != 2 {
@@ -185,7 +185,7 @@ func TestTransportNon200NotCached(t *testing.T) {
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte("not found"))
+		_, _ = w.Write([]byte("not found"))
 	}))
 	t.Cleanup(svr.Close)
 
@@ -193,12 +193,12 @@ func TestTransportNon200NotCached(t *testing.T) {
 
 	// First request: 404, should not be cached.
 	resp, _ := client.Get(svr.URL)
-	io.ReadAll(resp.Body)
+	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	// Second request: should still hit server.
 	resp, _ = client.Get(svr.URL)
-	io.ReadAll(resp.Body)
+	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	if hits.Load() != 2 {
@@ -212,7 +212,7 @@ func TestTransportDifferentURLsDifferentKeys(t *testing.T) {
 	var hits atomic.Int32
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		w.Write([]byte(r.URL.Path))
+		_, _ = w.Write([]byte(r.URL.Path))
 	}))
 	t.Cleanup(svr.Close)
 
@@ -248,7 +248,7 @@ func TestTransportConditionalETag(t *testing.T) {
 			return
 		}
 		w.Header().Set("ETag", `"abc123"`)
-		w.Write([]byte("original"))
+		_, _ = w.Write([]byte("original"))
 	}))
 	t.Cleanup(svr.Close)
 
@@ -293,7 +293,7 @@ func TestTransportSingleflight(t *testing.T) {
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		<-gate // block until test releases
-		w.Write([]byte("shared"))
+		_, _ = w.Write([]byte("shared"))
 	}))
 	t.Cleanup(svr.Close)
 
@@ -345,7 +345,7 @@ func TestTransportStats(t *testing.T) {
 	tr, _ := setupTransport(t)
 
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("data"))
+		_, _ = w.Write([]byte("data"))
 	}))
 	t.Cleanup(svr.Close)
 
@@ -353,12 +353,12 @@ func TestTransportStats(t *testing.T) {
 
 	// Miss + fetch.
 	resp, _ := client.Get(svr.URL + "/stats")
-	io.ReadAll(resp.Body)
+	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	// Hit.
 	resp, _ = client.Get(svr.URL + "/stats")
-	io.ReadAll(resp.Body)
+	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	s := tr.Stats()
@@ -377,7 +377,7 @@ func TestTransportUserAgent(t *testing.T) {
 	var gotUA string
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotUA = r.Header.Get("User-Agent")
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	}))
 	t.Cleanup(svr.Close)
 
@@ -385,7 +385,7 @@ func TestTransportUserAgent(t *testing.T) {
 	ctx := WithCachePolicy(context.Background(), CachePolicySkip)
 	req, _ := http.NewRequestWithContext(ctx, "GET", svr.URL+"/ua", nil)
 	resp, _ := client.Do(req)
-	io.ReadAll(resp.Body)
+	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	if gotUA != "limpet-test/1.0" {
@@ -396,7 +396,7 @@ func TestTransportUserAgent(t *testing.T) {
 	req2, _ := http.NewRequestWithContext(ctx, "GET", svr.URL+"/ua2", nil)
 	req2.Header.Set("User-Agent", "custom/2.0")
 	resp, _ = client.Do(req2)
-	io.ReadAll(resp.Body)
+	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	if gotUA != "custom/2.0" {
@@ -412,7 +412,7 @@ func TestTransportCacheStatuses(t *testing.T) {
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		w.WriteHeader(404)
-		w.Write([]byte("not found"))
+		_, _ = w.Write([]byte("not found"))
 	}))
 	t.Cleanup(svr.Close)
 
@@ -420,7 +420,7 @@ func TestTransportCacheStatuses(t *testing.T) {
 
 	// First: 404, should be cached.
 	resp, _ := client.Get(svr.URL + "/cached404")
-	io.ReadAll(resp.Body)
+	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	// Second: should come from cache.

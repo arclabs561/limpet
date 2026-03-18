@@ -103,6 +103,7 @@ func (s *proxyTarget) HandleConn(downstream net.Conn) {
 	doDur := time.Since(start)
 
 	resp := page.HTTPResponse()
+	defer resp.Body.Close()
 	resp.Header.Set("X-Limpet-Source", page.Meta.Source)
 	resp.Header.Set("X-Limpet-Fetched-At", page.Meta.FetchedAt.Format(time.RFC3339))
 	resp.Header.Set("X-Limpet-Fetch-Dur", page.Meta.FetchDur.String())
@@ -164,11 +165,15 @@ func (s *proxyTarget) handleConnect(downstream net.Conn, req *http.Request) {
 	wg.Add(2)
 	relay := func(dst, src net.Conn) {
 		defer wg.Done()
-		io.Copy(dst, src)
+		if _, err := io.Copy(dst, src); err != nil {
+			log.Debug().Err(err).Msg("relay copy ended")
+		}
 		// Signal EOF to the other side. For TCP, half-close the write
 		// direction so the peer sees EOF without tearing down the whole conn.
 		if tc, ok := dst.(*net.TCPConn); ok {
-			tc.CloseWrite()
+			if err := tc.CloseWrite(); err != nil {
+				log.Debug().Err(err).Msg("half-close write")
+			}
 		}
 	}
 	go relay(upstream, downstream)

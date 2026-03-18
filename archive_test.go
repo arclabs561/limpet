@@ -51,9 +51,9 @@ func TestArchiveAndVersions(t *testing.T) {
 		n := counter.Add(1)
 		w.Header().Set("Content-Type", "text/plain")
 		if n == 1 {
-			w.Write([]byte("version-1"))
+			_, _ = w.Write([]byte("version-1"))
 		} else {
-			w.Write([]byte("version-2"))
+			_, _ = w.Write([]byte("version-2"))
 		}
 	}))
 	t.Cleanup(svr.Close)
@@ -124,7 +124,7 @@ func TestArchiveNotWrittenWithoutFlag(t *testing.T) {
 	ctx := context.Background()
 
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("data"))
+		_, _ = w.Write([]byte("data"))
 	}))
 	t.Cleanup(svr.Close)
 
@@ -151,7 +151,7 @@ func TestDiffIdentical(t *testing.T) {
 	ctx := context.Background()
 
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("static"))
+		_, _ = w.Write([]byte("static"))
 	}))
 	t.Cleanup(svr.Close)
 
