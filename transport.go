@@ -1,7 +1,6 @@
 package limpet
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -9,6 +8,7 @@ import (
 	"time"
 
 	"go.uber.org/ratelimit"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/arclabs561/limpet/blob"
 )
@@ -28,6 +28,7 @@ type Transport struct {
 	ignoreHeaders    map[string]bool
 	ignoreParams     map[string]bool
 	cacheStatuses    map[int]bool
+	flight           singleflight.Group
 }
 
 // TransportOption configures a Transport.
@@ -183,49 +184,61 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 
-	// Rate limit.
-	if t.rateLimit != nil {
-		t.rateLimit.Take()
+	// Singleflight: coalesce concurrent requests for the same cache key.
+	// The flight returns a *Page so each caller gets an independent response.
+	type flightResult struct {
+		page   *Page
+		source string
 	}
+	v, err, _ := t.flight.Do(key, func() (any, error) {
+		// Rate limit.
+		if t.rateLimit != nil {
+			t.rateLimit.Take()
+		}
 
-	// Delegate to base transport.
-	resp, err := t.base().RoundTrip(req)
+		// Delegate to base transport.
+		resp, err := t.base().RoundTrip(req)
+		if err != nil {
+			return nil, err
+		}
+
+		// 304 Not Modified: return the cached response.
+		if resp.StatusCode == 304 && cachedPage != nil {
+			resp.Body.Close()
+			return &flightResult{page: cachedPage, source: "revalidated"}, nil
+		}
+
+		// Buffer the response body for caching.
+		var body []byte
+		if resp.Body != nil {
+			rdr := resp.Body
+			if t.respBodyLimit > 0 {
+				rdr = http.MaxBytesReader(nil, resp.Body, t.respBodyLimit)
+			}
+			body, err = io.ReadAll(rdr)
+			resp.Body.Close()
+			if err != nil {
+				return nil, fmt.Errorf("limpet: failed to read response body: %w", err)
+			}
+		}
+
+		page := pageFromRoundTrip(req, resp, body)
+
+		// Cache write.
+		if t.isCacheable(resp.StatusCode) && policy != CachePolicySkip {
+			if err := writeCachedPage(req.Context(), t.bucket, key, page); err != nil {
+				return nil, fmt.Errorf("failed to write cache: %w", err)
+			}
+		}
+
+		return &flightResult{page: page, source: "fetch"}, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	// 304 Not Modified: return the cached response.
-	if resp.StatusCode == 304 && cachedPage != nil {
-		resp.Body.Close()
-		cached := cachedPage.HTTPResponse()
-		cached.Header.Set("X-Limpet-Source", "revalidated")
-		return cached, nil
-	}
-
-	// Buffer the response body for caching.
-	var body []byte
-	if resp.Body != nil {
-		rdr := resp.Body
-		if t.respBodyLimit > 0 {
-			rdr = http.MaxBytesReader(nil, resp.Body, t.respBodyLimit)
-		}
-		body, err = io.ReadAll(rdr)
-		resp.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("limpet: failed to read response body: %w", err)
-		}
-	}
-	resp.Body = io.NopCloser(bytes.NewReader(body))
-
-	// Cache write (200 only).
-	if t.isCacheable(resp.StatusCode) && policy != CachePolicySkip {
-		page := pageFromRoundTrip(req, resp, body)
-		if err := writeCachedPage(req.Context(), t.bucket, key, page); err != nil {
-			return nil, fmt.Errorf("failed to write cache: %w", err)
-		}
-	}
-
-	resp.Header.Set("X-Limpet-Source", "fetch")
+	result := v.(*flightResult)
+	resp := result.page.HTTPResponse()
+	resp.Header.Set("X-Limpet-Source", result.source)
 	return resp, nil
 }
 
