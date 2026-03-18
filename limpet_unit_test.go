@@ -202,6 +202,40 @@ func TestBlobKeyIgnoreParams(t *testing.T) {
 	}
 }
 
+func TestBlobKeyURLNormalization(t *testing.T) {
+	c := &Client{}
+
+	t.Run("case insensitive host", func(t *testing.T) {
+		req1, _ := http.NewRequest("GET", "https://Example.COM/path", nil)
+		req2, _ := http.NewRequest("GET", "https://example.com/path", nil)
+		key1, _, _ := c.blobKey(req1)
+		key2, _, _ := c.blobKey(req2)
+		if key1 != key2 {
+			t.Errorf("host case changed key: %q vs %q", key1, key2)
+		}
+	})
+
+	t.Run("default port stripped", func(t *testing.T) {
+		req1, _ := http.NewRequest("GET", "https://example.com:443/path", nil)
+		req2, _ := http.NewRequest("GET", "https://example.com/path", nil)
+		key1, _, _ := c.blobKey(req1)
+		key2, _, _ := c.blobKey(req2)
+		if key1 != key2 {
+			t.Errorf("default port changed key: %q vs %q", key1, key2)
+		}
+	})
+
+	t.Run("query param order irrelevant", func(t *testing.T) {
+		req1, _ := http.NewRequest("GET", "https://example.com/path?b=2&a=1", nil)
+		req2, _ := http.NewRequest("GET", "https://example.com/path?a=1&b=2", nil)
+		key1, _, _ := c.blobKey(req1)
+		key2, _, _ := c.blobKey(req2)
+		if key1 != key2 {
+			t.Errorf("param order changed key: %q vs %q", key1, key2)
+		}
+	})
+}
+
 func TestArchiveKey(t *testing.T) {
 	ts := time.Date(2026, 3, 16, 21, 30, 45, 0, time.UTC)
 
