@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/ratelimit"
@@ -30,6 +31,16 @@ type Transport struct {
 	cacheStatuses    map[int]bool
 	userAgent        string
 	flight           singleflight.Group
+	stats            TransportStats
+}
+
+// TransportStats tracks cache performance counters. All fields are safe for
+// concurrent access. Read via Transport.Stats().
+type TransportStats struct {
+	Hits        atomic.Int64 // Cache hits (served from cache without fetch)
+	Misses      atomic.Int64 // Cache misses (required a fetch)
+	Revalidated atomic.Int64 // Conditional requests that returned 304
+	Coalesced   atomic.Int64 // Requests served by singleflight coalescing
 }
 
 // TransportOption configures a Transport.
@@ -110,6 +121,24 @@ func NewTransport(bucket *blob.Bucket, opts ...TransportOption) *Transport {
 	return t
 }
 
+// Stats returns a snapshot of the transport's cache performance counters.
+func (t *Transport) Stats() TransportStatsSnapshot {
+	return TransportStatsSnapshot{
+		Hits:        t.stats.Hits.Load(),
+		Misses:      t.stats.Misses.Load(),
+		Revalidated: t.stats.Revalidated.Load(),
+		Coalesced:   t.stats.Coalesced.Load(),
+	}
+}
+
+// TransportStatsSnapshot is a point-in-time snapshot of cache stats.
+type TransportStatsSnapshot struct {
+	Hits        int64
+	Misses      int64
+	Revalidated int64
+	Coalesced   int64
+}
+
 func (t *Transport) isCacheable(statusCode int) bool {
 	if t.cacheStatuses == nil {
 		return statusCode == 200
@@ -176,8 +205,10 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if policy == CachePolicyDefault {
 		resp, err := t.cacheRead(req.Context(), key)
 		if err == nil {
+			t.stats.Hits.Add(1)
 			return resp, nil
 		}
+		t.stats.Misses.Add(1)
 	}
 
 	// For Replace policy or cache miss, try conditional request if we have
@@ -201,7 +232,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		page   *Page
 		source string
 	}
-	v, err, _ := t.flight.Do(key, func() (any, error) {
+	v, err, shared := t.flight.Do(key, func() (any, error) {
 		// Rate limit.
 		if t.rateLimit != nil {
 			t.rateLimit.Take()
@@ -248,6 +279,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	result := v.(*flightResult)
+	if shared {
+		t.stats.Coalesced.Add(1)
+	}
+	if result.source == "revalidated" {
+		t.stats.Revalidated.Add(1)
+	}
 	resp := result.page.HTTPResponse()
 	resp.Header.Set("X-Limpet-Source", result.source)
 	return resp, nil

@@ -60,6 +60,10 @@ limpet cache get --meta example.com/abc123.json
 
 # Delete a cached entry
 limpet cache rm example.com/abc123.json
+
+# Purge all cached entries (or by host prefix)
+limpet cache purge
+limpet cache purge example.com
 ```
 
 ### Global flags
