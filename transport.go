@@ -27,6 +27,7 @@ type Transport struct {
 	respBodyLimit    int64
 	ignoreHeaders    map[string]bool
 	ignoreParams     map[string]bool
+	cacheStatuses    map[int]bool
 }
 
 // TransportOption configures a Transport.
@@ -78,6 +79,17 @@ func TransportWithIgnoreParams(names ...string) TransportOption {
 	}
 }
 
+// TransportWithCacheStatuses sets which HTTP status codes are eligible for
+// caching. By default only 200 is cached.
+func TransportWithCacheStatuses(codes ...int) TransportOption {
+	return func(t *Transport) {
+		t.cacheStatuses = make(map[int]bool, len(codes))
+		for _, code := range codes {
+			t.cacheStatuses[code] = true
+		}
+	}
+}
+
 // NewTransport creates a caching Transport backed by the given bucket.
 func NewTransport(bucket *blob.Bucket, opts ...TransportOption) *Transport {
 	t := &Transport{
@@ -89,6 +101,13 @@ func NewTransport(bucket *blob.Bucket, opts ...TransportOption) *Transport {
 		opt(t)
 	}
 	return t
+}
+
+func (t *Transport) isCacheable(statusCode int) bool {
+	if t.cacheStatuses == nil {
+		return statusCode == 200
+	}
+	return t.cacheStatuses[statusCode]
 }
 
 func (t *Transport) base() http.RoundTripper {
@@ -141,12 +160,27 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	// Cache read.
+	var cachedPage *Page
 	if policy == CachePolicyDefault {
 		resp, err := t.cacheRead(req.Context(), key)
 		if err == nil {
 			return resp, nil
 		}
-		// Not found -- fall through to fetch.
+	}
+
+	// For Replace policy or cache miss, try conditional request if we have
+	// a cached version with ETag or Last-Modified.
+	if policy != CachePolicySkip {
+		if page, err := readCachedPage(req.Context(), t.bucket, key); err == nil {
+			cachedPage = page
+			if etag := page.Response.Header.Get("ETag"); etag != "" {
+				req = req.Clone(req.Context())
+				req.Header.Set("If-None-Match", etag)
+			} else if lm := page.Response.Header.Get("Last-Modified"); lm != "" {
+				req = req.Clone(req.Context())
+				req.Header.Set("If-Modified-Since", lm)
+			}
+		}
 	}
 
 	// Rate limit.
@@ -158,6 +192,14 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.base().RoundTrip(req)
 	if err != nil {
 		return nil, err
+	}
+
+	// 304 Not Modified: return the cached response.
+	if resp.StatusCode == 304 && cachedPage != nil {
+		resp.Body.Close()
+		cached := cachedPage.HTTPResponse()
+		cached.Header.Set("X-Limpet-Source", "revalidated")
+		return cached, nil
 	}
 
 	// Buffer the response body for caching.
@@ -176,7 +218,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 
 	// Cache write (200 only).
-	if resp.StatusCode == 200 && policy != CachePolicySkip {
+	if t.isCacheable(resp.StatusCode) && policy != CachePolicySkip {
 		page := pageFromRoundTrip(req, resp, body)
 		if err := writeCachedPage(req.Context(), t.bucket, key, page); err != nil {
 			return nil, fmt.Errorf("failed to write cache: %w", err)

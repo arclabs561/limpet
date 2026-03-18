@@ -214,3 +214,51 @@ func TestTransportDifferentURLsDifferentKeys(t *testing.T) {
 		t.Errorf("server hits = %d, want 2 (different URLs)", hits.Load())
 	}
 }
+
+func TestTransportConditionalETag(t *testing.T) {
+	tr, _ := setupTransport(t)
+
+	var hits atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.Header.Get("If-None-Match") == `"abc123"` {
+			w.WriteHeader(304)
+			return
+		}
+		w.Header().Set("ETag", `"abc123"`)
+		w.Write([]byte("original"))
+	}))
+	t.Cleanup(svr.Close)
+
+	client := &http.Client{Transport: tr}
+
+	// First request: populates cache with ETag.
+	resp, err := client.Get(svr.URL + "/etag")
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "original" {
+		t.Errorf("body = %q, want original", body)
+	}
+
+	// Replace request: server returns 304, should get cached body back.
+	ctx := WithCachePolicy(context.Background(), CachePolicyReplace)
+	req, _ := http.NewRequestWithContext(ctx, "GET", svr.URL+"/etag", nil)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("conditional: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "original" {
+		t.Errorf("conditional body = %q, want original", body)
+	}
+	if src := resp.Header.Get("X-Limpet-Source"); src != "revalidated" {
+		t.Errorf("source = %q, want revalidated", src)
+	}
+	if hits.Load() != 2 {
+		t.Errorf("server hits = %d, want 2", hits.Load())
+	}
+}
