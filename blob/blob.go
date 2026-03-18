@@ -367,6 +367,44 @@ func (bu *Bucket) DeleteBlob(ctx context.Context, key string) error {
 	return nil
 }
 
+// PurgeCache deletes all entries in the local cache matching the given prefix.
+// An empty prefix deletes everything. Returns the number of entries deleted.
+func (bu *Bucket) PurgeCache(prefix string) (int, error) {
+	if bu.cache == nil {
+		return 0, nil
+	}
+	var keys [][]byte
+	err := bu.cache.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		pfx := []byte(prefix)
+		for it.Seek(pfx); it.Valid(); it.Next() {
+			key := it.Item().KeyCopy(nil)
+			if prefix != "" && !strings.HasPrefix(string(key), prefix) {
+				break
+			}
+			keys = append(keys, key)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("failed to list cache keys: %w", err)
+	}
+	deleted := 0
+	for _, k := range keys {
+		err := bu.cache.Update(func(txn *badger.Txn) error {
+			return txn.Delete(k)
+		})
+		if err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
+			return deleted, fmt.Errorf("failed to delete key: %w", err)
+		}
+		deleted++
+	}
+	return deleted, nil
+}
+
 var _ badger.Logger = (*badgerLogger)(nil)
 
 type badgerLogger struct {

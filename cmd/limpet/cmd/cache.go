@@ -37,6 +37,13 @@ var cacheRmCmd = &cobra.Command{
 	RunE:  cacheRmRunE,
 }
 
+var cachePurgeCmd = &cobra.Command{
+	Use:   "purge [prefix]",
+	Short: "Delete all cached entries (or those matching a prefix)",
+	Args:  cobra.MaximumNArgs(1),
+	RunE:  cachePurgeRunE,
+}
+
 func init() {
 	cacheLsCmd.Flags().BoolP("json", "j", false, "output as JSON")
 	cacheGetCmd.Flags().BoolP("headers", "i", false, "include response headers")
@@ -45,6 +52,7 @@ func init() {
 	cacheCmd.AddCommand(cacheLsCmd)
 	cacheCmd.AddCommand(cacheGetCmd)
 	cacheCmd.AddCommand(cacheRmCmd)
+	cacheCmd.AddCommand(cachePurgeCmd)
 }
 
 func cacheLsRunE(cmd *cobra.Command, args []string) error {
@@ -158,5 +166,25 @@ func cacheRmRunE(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to delete %q: %w", key, err)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "deleted %s\n", key)
+	return nil
+}
+
+func cachePurgeRunE(cmd *cobra.Command, args []string) error {
+	bucket, err := newBucket(cmd)
+	if err != nil {
+		return err
+	}
+	defer bucket.Close()
+
+	prefix := ""
+	if len(args) > 0 {
+		prefix = args[0]
+	}
+
+	n, err := bucket.PurgeCache(prefix)
+	if err != nil {
+		return fmt.Errorf("failed to purge cache: %w", err)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "purged %d entries\n", n)
 	return nil
 }
