@@ -251,7 +251,10 @@ func NewClient(
 
 	if c.httpClient == nil {
 		c.httpClient = &http.Client{Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
+			Proxy:               http.ProxyFromEnvironment,
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 100,
+			IdleConnTimeout:     90 * time.Second,
 		}}
 	}
 	c.startBrowser = sync.OnceValue(c.newBrowser)

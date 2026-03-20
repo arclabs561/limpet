@@ -38,6 +38,9 @@ func TestClientDefaultTransportRespectsProxy(t *testing.T) {
 	if tr.Proxy == nil {
 		t.Error("default transport Proxy is nil, should be http.ProxyFromEnvironment")
 	}
+	if tr.MaxIdleConnsPerHost != 100 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want 100", tr.MaxIdleConnsPerHost)
+	}
 }
 
 func TestClientWithHTTPClient(t *testing.T) {
