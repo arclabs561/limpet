@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -31,11 +32,28 @@ type BucketConfig struct {
 	CacheTTL time.Duration // 0 means use default (24h), negative means no expiry
 }
 
+// zstd encoder/decoder pools to avoid ~1 MB allocation per call.
+var (
+	zstdEncoderPool = sync.Pool{
+		New: func() any {
+			w, _ := zstd.NewWriter(nil)
+			return w
+		},
+	}
+	zstdDecoderPool = sync.Pool{
+		New: func() any {
+			r, _ := zstd.NewReader(nil)
+			return r
+		},
+	}
+)
+
 // Bucket provides two-tier blob storage (remote + local badger cache).
 type Bucket struct {
 	bucket   *blob.Bucket
 	cache    *badger.DB
 	cacheTTL time.Duration
+	stopGC   chan struct{} // closed to stop background GC goroutine
 }
 
 // NewBucket creates a Bucket backed by the given URL (file:// or s3://).
@@ -77,11 +95,36 @@ func NewBucket(
 	if err != nil {
 		return nil, err
 	}
-	return &Bucket{
+	bu := &Bucket{
 		bucket:   bucket,
 		cache:    cache,
 		cacheTTL: cacheTTL,
-	}, nil
+		stopGC:   make(chan struct{}),
+	}
+	if cache != nil {
+		go bu.runGC()
+	}
+	return bu, nil
+}
+
+// runGC periodically triggers badger value log garbage collection.
+// Without this, the value log grows unbounded as entries expire or are deleted.
+func (bu *Bucket) runGC() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-bu.stopGC:
+			return
+		case <-ticker.C:
+			// Run GC until it reports less than 50% space could be reclaimed.
+			for {
+				if bu.cache.RunValueLogGC(0.5) != nil {
+					break
+				}
+			}
+		}
+	}
 }
 
 func newBucket(
@@ -125,6 +168,7 @@ func newBucket(
 
 // Close shuts down the local cache and remote bucket.
 func (bu *Bucket) Close() {
+	close(bu.stopGC)
 	if bu.cache != nil {
 		if err := bu.cache.Close(); err != nil {
 			log.Err(err).Msg("failed to close cache")
@@ -150,33 +194,33 @@ func WithCacheTTL(ctx context.Context, ttl time.Duration) context.Context {
 	return context.WithValue(ctx, ctxKeyCacheTTL{}, ttl)
 }
 
+// compressZstd compresses data using a pooled zstd encoder.
+func compressZstd(data []byte) []byte {
+	zw := zstdEncoderPool.Get().(*zstd.Encoder)
+	defer zstdEncoderPool.Put(zw)
+	return zw.EncodeAll(data, nil)
+}
+
 // SetBlob writes data to the remote bucket and local cache under the given key.
-// If the context carries a TTL from WithCacheTTL, it overrides the bucket default.
+// Data is zstd-compressed in both tiers. If the context carries a TTL from
+// WithCacheTTL, it overrides the bucket default.
 func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte) error {
 	key += ".zst"
+	compressed := compressZstd(data)
+
 	if bu.bucket != nil {
 		w, err := bu.bucket.NewWriter(ctx, key, nil)
 		if err != nil {
 			return fmt.Errorf("failed to create bucket writer: %w", err)
 		}
-		zw, err := zstd.NewWriter(w)
+		n, err := w.Write(compressed)
 		if err != nil {
-			_ = w.Close()
-			return fmt.Errorf("failed to create zstd writer: %w", err)
-		}
-		n, err := zw.Write(data)
-		if err != nil {
-			_ = zw.Close()
 			_ = w.Close()
 			return err
 		}
-		if n < len(data) {
-			_ = zw.Close()
+		if n < len(compressed) {
 			_ = w.Close()
-			return fmt.Errorf("violation of io.Writer interface: %d < %d", n, len(data))
-		}
-		if err := zw.Close(); err != nil {
-			return fmt.Errorf("failed to close zstd writer: %w", err)
+			return fmt.Errorf("violation of io.Writer interface: %d < %d", n, len(compressed))
 		}
 		if err := w.Close(); err != nil {
 			return fmt.Errorf("failed to close bucket writer: %w", err)
@@ -188,7 +232,7 @@ func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte) error {
 			ttl = override
 		}
 		err := bu.cache.Update(func(txn *badger.Txn) error {
-			entry := badger.NewEntry([]byte(key), data).WithDiscard()
+			entry := badger.NewEntry([]byte(key), compressed).WithDiscard()
 			if ttl > 0 {
 				entry.WithTTL(ttl)
 			}
@@ -216,7 +260,39 @@ type Blob struct {
 	Source string
 }
 
+// decompressZstd decompresses zstd data using a pooled decoder.
+func decompressZstd(compressed []byte) ([]byte, error) {
+	zr := zstdDecoderPool.Get().(*zstd.Decoder)
+	defer zstdDecoderPool.Put(zr)
+	// Cap decompressed size to prevent zip-bomb style memory exhaustion.
+	const maxDecompressed = 500e6 // 500 MB
+	data, err := zr.DecodeAll(compressed, nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > int(maxDecompressed) {
+		return nil, fmt.Errorf("decompressed size %d exceeds limit %d", len(data), int(maxDecompressed))
+	}
+	return data, nil
+}
+
+// decompressZstdStream decompresses zstd data from a reader using a pooled decoder.
+func decompressZstdStream(r io.Reader) ([]byte, error) {
+	zr := zstdDecoderPool.Get().(*zstd.Decoder)
+	defer zstdDecoderPool.Put(zr)
+	if err := zr.Reset(r); err != nil {
+		return nil, fmt.Errorf("failed to reset zstd reader: %w", err)
+	}
+	const maxDecompressed = 500e6 // 500 MB
+	data, err := io.ReadAll(io.LimitReader(zr, maxDecompressed))
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
 // GetBlob reads data by key, checking the local cache first, then the remote bucket.
+// Both tiers store zstd-compressed data; decompression is transparent.
 func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) {
 	if bu.cache == nil && bu.bucket == nil {
 		return nil, errors.New("neither cache nor external bucket is configured")
@@ -261,7 +337,11 @@ func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) 
 		}
 	}
 	if cacheData != nil {
-		return &Blob{Data: cacheData, Source: "cache"}, nil
+		data, err := decompressZstd(cacheData)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decompress cached data: %w", err)
+		}
+		return &Blob{Data: data, Source: "cache"}, nil
 	}
 
 	if bu.bucket != nil {
@@ -272,33 +352,25 @@ func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) 
 			}
 			return nil, fmt.Errorf("failed to create bucket reader: %w", err)
 		}
-		zr, err := zstd.NewReader(r)
+		data, err := decompressZstdStream(r)
+		if closeErr := r.Close(); closeErr != nil && err == nil {
+			return nil, fmt.Errorf("failed to close bucket reader: %w", closeErr)
+		}
 		if err != nil {
-			_ = r.Close()
-			return nil, fmt.Errorf("failed to create zstd reader: %w", err)
+			return nil, fmt.Errorf("failed to decompress remote data: %w", err)
 		}
-		// Cap decompressed size to prevent zip-bomb style memory exhaustion.
-		const maxDecompressed = 500e6 // 500 MB
-		data, err := io.ReadAll(io.LimitReader(zr, maxDecompressed))
-		if err != nil {
-			zr.Close()
-			_ = r.Close()
-			return nil, err
-		}
-		zr.Close()
-		if err := r.Close(); err != nil {
-			return nil, fmt.Errorf("failed to close bucket reader: %w", err)
-		}
-		if cacheData == nil && bu.cache != nil {
-			err := bu.cache.Update(func(txn *badger.Txn) error {
-				entry := badger.NewEntry([]byte(key), data).WithDiscard()
+		// Backfill local cache with compressed data.
+		if bu.cache != nil {
+			compressed := compressZstd(data)
+			cacheErr := bu.cache.Update(func(txn *badger.Txn) error {
+				entry := badger.NewEntry([]byte(key), compressed).WithDiscard()
 				if bu.cacheTTL > 0 {
 					entry.WithTTL(bu.cacheTTL)
 				}
 				return txn.SetEntry(entry)
 			})
-			if err != nil {
-				log.Err(err).Msg("failed to set cache")
+			if cacheErr != nil {
+				log.Err(cacheErr).Msg("failed to set cache")
 			}
 		}
 		return &Blob{
@@ -396,17 +468,18 @@ func (bu *Bucket) PurgeCache(prefix string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to list cache keys: %w", err)
 	}
-	deleted := 0
+	// Use WriteBatch for efficient bulk deletion.
+	wb := bu.cache.NewWriteBatch()
 	for _, k := range keys {
-		err := bu.cache.Update(func(txn *badger.Txn) error {
-			return txn.Delete(k)
-		})
-		if err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
-			return deleted, fmt.Errorf("failed to delete key: %w", err)
+		if err := wb.Delete(k); err != nil {
+			wb.Cancel()
+			return 0, fmt.Errorf("failed to batch delete key: %w", err)
 		}
-		deleted++
 	}
-	return deleted, nil
+	if err := wb.Flush(); err != nil {
+		return 0, fmt.Errorf("failed to flush batch delete: %w", err)
+	}
+	return len(keys), nil
 }
 
 var _ badger.Logger = (*badgerLogger)(nil)

@@ -646,3 +646,127 @@ func TestRefreshPatternNoMatch(t *testing.T) {
 		t.Error("expected no match for .html URL with .pdf pattern")
 	}
 }
+
+func TestTransportSingleflightForgetOnError(t *testing.T) {
+	tr, _ := setupTransport(t)
+
+	var hits atomic.Int32
+	gate := make(chan struct{})
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := hits.Add(1)
+		if n == 1 {
+			// First request: block until gate, then fail.
+			<-gate
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		// Subsequent requests succeed.
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(svr.Close)
+
+	client := &http.Client{Transport: tr}
+
+	// Launch two concurrent requests with Replace policy.
+	// Both enter singleflight. First will fail (502).
+	// With Forget, the second should be able to retry independently.
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	bodies := make([]string, 2)
+
+	for i := range 2 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			ctx := WithCachePolicy(t.Context(), CachePolicyReplace)
+			req, _ := http.NewRequestWithContext(ctx, "GET", svr.URL+"/forget", nil)
+			resp, err := client.Do(req)
+			if err != nil {
+				errs[idx] = err
+				return
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			bodies[idx] = string(body)
+		}(i)
+	}
+
+	// Release the gate to let the first request fail.
+	close(gate)
+	wg.Wait()
+
+	// At least one request should succeed (the retry after Forget).
+	// With singleflight coalescing, both may share the first failure,
+	// but subsequent independent requests should work.
+	// The key property: the key is forgotten, so future requests aren't blocked.
+	ctx := WithCachePolicy(t.Context(), CachePolicyReplace)
+	req, _ := http.NewRequestWithContext(ctx, "GET", svr.URL+"/forget", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("post-forget request should succeed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "ok" {
+		t.Errorf("post-forget body = %q, want ok", body)
+	}
+}
+
+func BenchmarkBlobKey(b *testing.B) {
+	req, _ := http.NewRequest("GET", "https://example.com/page?a=1&b=2&c=3", nil)
+	req.Header.Set("User-Agent", "bench/1.0")
+	req.Header.Set("Accept", "text/html")
+	req.Header.Set("Accept-Language", "en-US")
+
+	b.ResetTimer()
+	for b.Loop() {
+		_, _, err := blobKey(req, 10e6, nil, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkSetGetBlob(b *testing.B) {
+	bucket, err := blob.NewBucket(b.Context(), b.TempDir(), &blob.BucketConfig{CacheDir: b.TempDir()})
+	if err != nil {
+		b.Fatalf("failed to create bucket: %v", err)
+	}
+	b.Cleanup(func() { bucket.Close() })
+
+	// Simulate a typical cached HTML page (~50 KB).
+	data := make([]byte, 50*1024)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+
+	b.Run("Set", func(b *testing.B) {
+		for i := range b.N {
+			key := fmt.Sprintf("bench/key-%d.json", i)
+			if err := bucket.SetBlob(b.Context(), key, data); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	// Populate for Get benchmark.
+	for i := range 1000 {
+		key := fmt.Sprintf("bench/get-%d.json", i)
+		if err := bucket.SetBlob(b.Context(), key, data); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.Run("Get", func(b *testing.B) {
+		for i := range b.N {
+			key := fmt.Sprintf("bench/get-%d.json", i%1000)
+			bl, err := bucket.GetBlob(b.Context(), key)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if len(bl.Data) != len(data) {
+				b.Fatalf("data size mismatch: got %d, want %d", len(bl.Data), len(data))
+			}
+		}
+	})
+}

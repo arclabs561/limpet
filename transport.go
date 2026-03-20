@@ -262,6 +262,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// Delegate to base transport.
 		resp, err := t.base().RoundTrip(req)
 		if err != nil {
+			// Forget the key so the next waiter retries independently
+			// instead of all waiters receiving this transient error.
+			t.flight.Forget(key)
 			return nil, err
 		}
 
