@@ -30,6 +30,8 @@ type Transport struct {
 	ignoreParams     map[string]bool
 	cacheStatuses    map[int]bool
 	userAgent        string
+	refreshPatterns  []RefreshPattern
+	staleIfError     bool
 	flight           singleflight.Group
 	stats            TransportStats
 }
@@ -45,6 +47,8 @@ type TransportStats struct {
 	Revalidated atomic.Int64
 	// Coalesced counts requests served by singleflight coalescing.
 	Coalesced atomic.Int64
+	// StaleServed counts responses served from stale cache on upstream error.
+	StaleServed atomic.Int64
 }
 
 // TransportOption configures a Transport.
@@ -132,6 +136,7 @@ func (t *Transport) Stats() TransportStatsSnapshot {
 		Misses:      t.stats.Misses.Load(),
 		Revalidated: t.stats.Revalidated.Load(),
 		Coalesced:   t.stats.Coalesced.Load(),
+		StaleServed: t.stats.StaleServed.Load(),
 	}
 }
 
@@ -141,6 +146,19 @@ type TransportStatsSnapshot struct {
 	Misses      int64
 	Revalidated int64
 	Coalesced   int64
+	StaleServed int64
+}
+
+// TransportWithRefreshPatterns sets URL-based cache TTL rules for the transport.
+// The first matching pattern determines the TTL for cache writes.
+func TransportWithRefreshPatterns(patterns ...RefreshPattern) TransportOption {
+	return func(t *Transport) { t.refreshPatterns = patterns }
+}
+
+// TransportWithStaleIfError configures the transport to return a stale cached
+// response when the upstream fetch fails, rather than propagating the error.
+func TransportWithStaleIfError(enabled bool) TransportOption {
+	return func(t *Transport) { t.staleIfError = enabled }
 }
 
 func (t *Transport) isCacheable(statusCode int) bool {
@@ -269,9 +287,17 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 		page := pageFromRoundTrip(req, resp, body)
 
-		// Cache write.
+		// Cache write with refresh pattern TTL.
 		if t.isCacheable(resp.StatusCode) && policy != CachePolicySkip {
-			if err := writeCachedPage(req.Context(), t.bucket, key, page); err != nil {
+			writeCtx := req.Context()
+			if len(t.refreshPatterns) > 0 {
+				if _, hasCtxTTL := writeCtx.Value(blob.CacheTTLKey{}).(time.Duration); !hasCtxTTL {
+					if ttl, ok := matchRefreshTTL(t.refreshPatterns, req.URL.String()); ok {
+						writeCtx = blob.WithCacheTTL(writeCtx, ttl)
+					}
+				}
+			}
+			if err := writeCachedPage(writeCtx, t.bucket, key, page); err != nil {
 				return nil, fmt.Errorf("failed to write cache: %w", err)
 			}
 		}
@@ -279,6 +305,13 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return &flightResult{page: page, source: "fetch"}, nil
 	})
 	if err != nil {
+		// stale-if-error: return cached page on upstream failure.
+		if t.staleIfError && cachedPage != nil {
+			t.stats.StaleServed.Add(1)
+			resp := cachedPage.HTTPResponse()
+			resp.Header.Set("X-Limpet-Source", "stale")
+			return resp, nil
+		}
 		return nil, err
 	}
 	result := v.(*flightResult)

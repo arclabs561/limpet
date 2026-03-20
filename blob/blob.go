@@ -137,6 +137,10 @@ func (bu *Bucket) Close() {
 	}
 }
 
+// CacheTTLKey is the context key for cache TTL overrides.
+// Exported so callers can check whether a TTL is already set.
+type CacheTTLKey = ctxKeyCacheTTL
+
 type ctxKeyCacheTTL struct{}
 
 // WithCacheTTL returns a context that overrides the bucket's default cache TTL

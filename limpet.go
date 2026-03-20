@@ -75,6 +75,8 @@ type Client struct {
 	userAgent        string
 	retry            RetryConfig
 	rateLimit        ratelimit.Limiter
+	refreshPatterns  []RefreshPattern
+	staleIfError     bool
 	startedAt        time.Time
 	requests         atomic.Uint64
 }
@@ -170,6 +172,30 @@ type RetryConfig struct {
 	Jitter time.Duration
 }
 
+// WithHTTPClient sets the underlying HTTP client used for requests.
+// Use this to configure custom transports, proxies, or TLS settings.
+// If not set, a default client with proxy support (HTTP_PROXY/HTTPS_PROXY)
+// is created automatically.
+func WithHTTPClient(hc *http.Client) Option {
+	return func(c *Client) { c.httpClient = hc }
+}
+
+// WithRefreshPatterns sets URL-based cache TTL rules. When writing to cache,
+// the first matching pattern determines the TTL. Patterns are checked in order.
+// If no pattern matches, the bucket's default TTL applies.
+//
+// This is analogous to Squid's refresh_pattern directive.
+func WithRefreshPatterns(patterns ...RefreshPattern) Option {
+	return func(c *Client) { c.refreshPatterns = patterns }
+}
+
+// WithStaleIfError configures the client to return a stale cached response
+// when a fresh fetch fails (network error, server error, etc.). Only applies
+// when a cached response exists (e.g. during CachePolicyReplace / force-refetch).
+func WithStaleIfError(enabled bool) Option {
+	return func(c *Client) { c.staleIfError = enabled }
+}
+
 // WithRetry configures retry behavior. Zero-value fields keep defaults.
 func WithRetry(cfg RetryConfig) Option {
 	return func(c *Client) {
@@ -223,7 +249,11 @@ func NewClient(
 		opt(c)
 	}
 
-	c.httpClient = &http.Client{Transport: &http.Transport{}}
+	if c.httpClient == nil {
+		c.httpClient = &http.Client{Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+		}}
+	}
 	c.startBrowser = sync.OnceValue(c.newBrowser)
 
 	if c.alwaysDoBrowser {
@@ -703,6 +733,11 @@ func (c *Client) do(
 	}
 	page, err = fetchFn(ctx, req, reqBody, opts)
 	if err != nil {
+		// stale-if-error: return cached page on fetch failure.
+		if c.staleIfError && cachedPage != nil {
+			cachedPage.Meta.Source = "stale"
+			return cachedPage, nil
+		}
 		return nil, fmt.Errorf("failed to fetch page: %w", err)
 	}
 
@@ -715,7 +750,16 @@ func (c *Client) do(
 	// Only cache responses with cacheable status codes to prevent transient
 	// errors from becoming permanent cache entries.
 	if c.isCacheable(page.Response.StatusCode) {
-		if err := writeCachedPage(ctx, c.bucket, bkey, page); err != nil {
+		// Apply refresh pattern TTL if no per-request TTL is set.
+		writeCtx := ctx
+		if len(c.refreshPatterns) > 0 {
+			if _, hasCtxTTL := ctx.Value(blob.CacheTTLKey{}).(time.Duration); !hasCtxTTL {
+				if ttl, ok := matchRefreshTTL(c.refreshPatterns, req.URL.String()); ok {
+					writeCtx = blob.WithCacheTTL(ctx, ttl)
+				}
+			}
+		}
+		if err := writeCachedPage(writeCtx, c.bucket, bkey, page); err != nil {
 			return nil, fmt.Errorf("failed to write page: %w", err)
 		}
 		// Write a timestamped archive snapshot for version history.
