@@ -28,7 +28,7 @@ func TestProxyHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
-	defer conn.Close()
+	defer conn.Close() //nolint:errcheck
 
 	// Write raw HTTP with absolute URI so the proxy sees the host.
 	reqLine := fmt.Sprintf("GET %s/test HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
@@ -68,7 +68,7 @@ func TestProxyHTTPNon200(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
-	defer conn.Close()
+	defer conn.Close() //nolint:errcheck
 
 	reqLine := fmt.Sprintf("GET %s/missing HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
 		origin.URL, origin.Listener.Addr().String())
@@ -96,7 +96,7 @@ func TestProxyCONNECTBlocksLoopback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
-	defer conn.Close()
+	defer conn.Close() //nolint:errcheck
 
 	// CONNECT to loopback should be blocked by SSRF check.
 	fmt.Fprintf(conn, "CONNECT 127.0.0.1:443 HTTP/1.1\r\nHost: 127.0.0.1:443\r\n\r\n")
@@ -118,7 +118,7 @@ func TestProxyCONNECTBlocksPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
-	defer conn.Close()
+	defer conn.Close() //nolint:errcheck
 
 	// CONNECT to RFC 1918 address should be blocked.
 	fmt.Fprintf(conn, "CONNECT 10.0.0.1:443 HTTP/1.1\r\nHost: 10.0.0.1:443\r\n\r\n")
@@ -197,12 +197,13 @@ func setupProxyOpts(t *testing.T, allowPrivate bool) proxyState {
 			go target.HandleConn(conn)
 		}
 	}()
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 
 	return proxyState{addr: ln.Addr().String()}
 }
 
 func setupProxy(t *testing.T) proxyState {
+	t.Helper()
 	// Tests use localhost origins, so allow private by default.
 	return setupProxyOpts(t, true)
 }

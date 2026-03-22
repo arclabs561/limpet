@@ -177,7 +177,7 @@ func TestClientRefreshPatterns(t *testing.T) {
 	var hits atomic.Int32
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := hits.Add(1)
-		_, _ = w.Write([]byte(fmt.Sprintf("resp-%d", n)))
+		fmt.Fprintf(w, "resp-%d", n)
 	}))
 	t.Cleanup(svr.Close)
 
@@ -259,7 +259,7 @@ func TestClientCachePolicySkip(t *testing.T) {
 
 	// Second request with CachePolicySkip: should bypass cache entirely.
 	ctx := WithCachePolicy(t.Context(), CachePolicySkip)
-	page, err = cl.Get(ctx, svr.URL)
+	_, err = cl.Get(ctx, svr.URL)
 	if err != nil {
 		t.Fatalf("skip get: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestClientCachePolicySkip(t *testing.T) {
 	}
 
 	// Third request without skip: should still return cached (first fetch).
-	page, err = cl.Get(t.Context(), svr.URL)
+	_, err = cl.Get(t.Context(), svr.URL)
 	if err != nil {
 		t.Fatalf("cached get: %v", err)
 	}

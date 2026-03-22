@@ -539,7 +539,7 @@ func TestTransportRefreshPatterns(t *testing.T) {
 	var hits atomic.Int32
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := hits.Add(1)
-		_, _ = w.Write([]byte(fmt.Sprintf("response-%d", n)))
+		fmt.Fprintf(w, "response-%d", n)
 	}))
 	t.Cleanup(svr.Close)
 

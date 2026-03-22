@@ -43,10 +43,7 @@ func (c *Client) GetMany(
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
-			break
 		}
-		// Re-check after select; the ctx.Done case in the select above
-		// uses break which only exits the select, not the for loop.
 		if ctx.Err() != nil {
 			break
 		}
