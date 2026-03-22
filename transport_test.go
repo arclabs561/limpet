@@ -378,7 +378,7 @@ func TestTransportStats(t *testing.T) {
 
 func TestTransportUserAgent(t *testing.T) {
 	tr, _ := setupTransport(t)
-	tr = NewTransport(tr.bucket, TransportWithUserAgent("limpet-test/1.0"))
+	tr = NewTransport(tr.cache.bucket, TransportWithUserAgent("limpet-test/1.0"))
 
 	var gotUA string
 	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
