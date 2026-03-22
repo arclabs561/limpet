@@ -403,7 +403,7 @@ func (c *Client) fetchHTTP(
 		// Restore request body for each attempt.
 		req.Body = io.NopCloser(bytes.NewReader(reqBody))
 
-		resp, err = c.httpClient.Do(req)
+		resp, err = c.httpClient.Do(req) //nolint:bodyclose // closed on line below (ReadAll + Close)
 		if err != nil {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
