@@ -1,6 +1,7 @@
 package blob
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -24,6 +25,12 @@ import (
 )
 
 const defaultCacheTTL = 24 * time.Hour
+
+// Blob.Source values describing where a blob was read from.
+const (
+	SourceCache  = "cache"
+	SourceRemote = "remote"
+)
 
 // BucketConfig configures a Bucket.
 type BucketConfig struct {
@@ -275,33 +282,30 @@ type Blob struct {
 	Source string
 }
 
+// maxDecompressed caps decompressed data to prevent zip-bomb memory exhaustion.
+const maxDecompressed = 500e6 // 500 MB
+
 // decompressZstd decompresses zstd data using a pooled decoder.
+// Size is limited to maxDecompressed bytes via streaming decompression.
 func decompressZstd(compressed []byte) ([]byte, error) {
-	zr := zstdDecoderPool.Get().(*zstd.Decoder)
-	defer zstdDecoderPool.Put(zr)
-	// Cap decompressed size to prevent zip-bomb style memory exhaustion.
-	const maxDecompressed = 500e6 // 500 MB
-	data, err := zr.DecodeAll(compressed, nil)
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > int(maxDecompressed) {
-		return nil, fmt.Errorf("decompressed size %d exceeds limit %d", len(data), int(maxDecompressed))
-	}
-	return data, nil
+	return decompressZstdStream(bytes.NewReader(compressed))
 }
 
 // decompressZstdStream decompresses zstd data from a reader using a pooled decoder.
+// Returns an error if the decompressed data exceeds maxDecompressed bytes.
 func decompressZstdStream(r io.Reader) ([]byte, error) {
 	zr := zstdDecoderPool.Get().(*zstd.Decoder)
 	defer zstdDecoderPool.Put(zr)
 	if err := zr.Reset(r); err != nil {
 		return nil, fmt.Errorf("failed to reset zstd reader: %w", err)
 	}
-	const maxDecompressed = 500e6 // 500 MB
-	data, err := io.ReadAll(io.LimitReader(zr, maxDecompressed))
+	lr := io.LimitReader(zr, int64(maxDecompressed)+1)
+	data, err := io.ReadAll(lr)
 	if err != nil {
 		return nil, err
+	}
+	if len(data) > int(maxDecompressed) {
+		return nil, fmt.Errorf("decompressed size exceeds limit %d", int(maxDecompressed))
 	}
 	return data, nil
 }
@@ -356,7 +360,7 @@ func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) 
 		if err != nil {
 			return nil, fmt.Errorf("failed to decompress cached data: %w", err)
 		}
-		return &Blob{Data: data, Source: "cache"}, nil
+		return &Blob{Data: data, Source: SourceCache}, nil
 	}
 
 	if bu.bucket != nil {
@@ -390,7 +394,7 @@ func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) 
 		}
 		return &Blob{
 			Data:   data,
-			Source: "remote",
+			Source: SourceRemote,
 		}, nil
 	}
 
