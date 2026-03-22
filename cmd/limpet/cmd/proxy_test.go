@@ -90,7 +90,7 @@ func TestProxyHTTPNon200(t *testing.T) {
 }
 
 func TestProxyCONNECTBlocksLoopback(t *testing.T) {
-	pt := setupProxy(t)
+	pt := setupProxyOpts(t, false)
 
 	conn, err := net.DialTimeout("tcp", pt.addr, 5*time.Second)
 	if err != nil {
@@ -112,7 +112,7 @@ func TestProxyCONNECTBlocksLoopback(t *testing.T) {
 }
 
 func TestProxyCONNECTBlocksPrivate(t *testing.T) {
-	pt := setupProxy(t)
+	pt := setupProxyOpts(t, false)
 
 	conn, err := net.DialTimeout("tcp", pt.addr, 5*time.Second)
 	if err != nil {
@@ -166,7 +166,7 @@ type proxyState struct {
 	addr string
 }
 
-func setupProxy(t *testing.T) proxyState {
+func setupProxyOpts(t *testing.T, allowPrivate bool) proxyState {
 	t.Helper()
 
 	bucket, err := blob.NewBucket(t.Context(), t.TempDir(), &blob.BucketConfig{CacheDir: t.TempDir()})
@@ -181,15 +181,13 @@ func setupProxy(t *testing.T) proxyState {
 	}
 	t.Cleanup(cl.Close)
 
-	// Listen on a random port.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 
-	target := &proxyTarget{ctx: t.Context(), cl: cl}
+	target := &proxyTarget{ctx: t.Context(), cl: cl, allowPrivate: allowPrivate}
 
-	// Accept connections in the background.
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -202,4 +200,9 @@ func setupProxy(t *testing.T) proxyState {
 	t.Cleanup(func() { ln.Close() })
 
 	return proxyState{addr: ln.Addr().String()}
+}
+
+func setupProxy(t *testing.T) proxyState {
+	// Tests use localhost origins, so allow private by default.
+	return setupProxyOpts(t, true)
 }

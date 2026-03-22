@@ -30,6 +30,11 @@ func init() {
 		"localhost:8080",
 		"address to listen on",
 	)
+	proxyCmd.Flags().Bool(
+		"allow-private",
+		false,
+		"allow requests to private/loopback addresses (disables SSRF protection)",
+	)
 }
 
 func proxyRunE(cmd *cobra.Command, args []string) error {
@@ -46,7 +51,8 @@ func proxyRunE(cmd *cobra.Command, args []string) error {
 	defer ln.Close()
 	log.Debug().Str("addr", addr).Msg("starting proxy server")
 
-	target := &proxyTarget{ctx: ctx, cl: cl}
+	allowPrivate := mustFlagBool(cmd, "allow-private")
+	target := &proxyTarget{ctx: ctx, cl: cl, allowPrivate: allowPrivate}
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -57,8 +63,9 @@ func proxyRunE(cmd *cobra.Command, args []string) error {
 }
 
 type proxyTarget struct {
-	ctx context.Context
-	cl  *limpet.Client
+	ctx          context.Context
+	cl           *limpet.Client
+	allowPrivate bool
 }
 
 func (s *proxyTarget) HandleConn(downstream net.Conn) {
@@ -85,10 +92,23 @@ func (s *proxyTarget) HandleConn(downstream net.Conn) {
 	// Clear it so the request can be forwarded.
 	req.RequestURI = ""
 
+	// Block plain HTTP requests to private/loopback addresses (SSRF prevention).
+	if !s.allowPrivate {
+		host := req.URL.Host
+		if _, _, err := net.SplitHostPort(host); err != nil {
+			host = net.JoinHostPort(host, "80")
+		}
+		if err := validateConnectHost(host); err != nil {
+			log.Warn().Err(err).Str("host", req.URL.Host).Msg("plain HTTP request blocked")
+			writeHTTPError(downstream, http.StatusForbidden, err)
+			return
+		}
+	}
+
 	log.Debug().Str("host", req.URL.Host).Str("path", req.URL.Path).Msg("processing request")
 
 	start := time.Now()
-	page, err := s.cl.Do(s.ctx, req)
+	page, err := s.cl.Do(s.ctx, req, limpet.DoConfig{})
 	if err != nil {
 		// If the fetch succeeded but returned non-200, forward the response
 		// instead of dropping the connection.
@@ -136,10 +156,12 @@ func (s *proxyTarget) handleConnect(downstream net.Conn, req *http.Request) {
 		host = net.JoinHostPort(host, "443")
 	}
 
-	if err := validateConnectHost(host); err != nil {
-		log.Warn().Err(err).Str("host", host).Msg("CONNECT blocked")
-		writeHTTPError(downstream, http.StatusForbidden, err)
-		return
+	if !s.allowPrivate {
+		if err := validateConnectHost(host); err != nil {
+			log.Warn().Err(err).Str("host", host).Msg("CONNECT blocked")
+			writeHTTPError(downstream, http.StatusForbidden, err)
+			return
+		}
 	}
 
 	log.Debug().Str("host", host).Msg("CONNECT tunnel")
