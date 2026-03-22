@@ -29,7 +29,7 @@ func TestLiveDoTwice(t *testing.T) {
 
 	// First request should hit live web, without browser automation as we
 	// didn't request it.
-	page, err := ts.client.Do(ts.ctx, req)
+	page, err := ts.client.Do(ts.ctx, req, limpet.DoConfig{})
 	if err != nil {
 		t.Fatalf("failed to do request: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestLiveDoTwice(t *testing.T) {
 	}
 
 	// Second request should hit cache.
-	page, err = ts.client.Do(ts.ctx, req)
+	page, err = ts.client.Do(ts.ctx, req, limpet.DoConfig{})
 	if err != nil {
 		t.Fatalf("failed to do request: %v", err)
 	}

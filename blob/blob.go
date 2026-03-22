@@ -138,10 +138,7 @@ func (bu *Bucket) runGC() {
 			return
 		case <-ticker.C:
 			// Run GC until it reports less than 50% space could be reclaimed.
-			for {
-				if bu.cache.RunValueLogGC(0.5) != nil {
-					break
-				}
+			for bu.cache.RunValueLogGC(0.5) == nil {
 			}
 		}
 	}

@@ -293,7 +293,7 @@ func (t *Transport) fetchAndCache(
 
 	// 304 Not Modified: return the cached response.
 	if resp.StatusCode == 304 && cachedPage != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		cachedPage.Meta.Source = SourceRevalidated
 		t.stats.revalidated.Add(1)
 		return cachedPage, nil
@@ -307,7 +307,7 @@ func (t *Transport) fetchAndCache(
 			rdr = http.MaxBytesReader(nil, resp.Body, t.respBodyLimit)
 		}
 		body, err = io.ReadAll(rdr)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("limpet: failed to read response body: %w", err)
 		}

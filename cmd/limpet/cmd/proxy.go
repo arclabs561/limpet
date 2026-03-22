@@ -69,7 +69,7 @@ type proxyTarget struct {
 }
 
 func (s *proxyTarget) HandleConn(downstream net.Conn) {
-	defer downstream.Close()
+	defer downstream.Close() //nolint:errcheck // best-effort close
 
 	br := bufio.NewReader(downstream)
 	req, err := http.ReadRequest(br)
@@ -172,7 +172,7 @@ func (s *proxyTarget) handleConnect(downstream net.Conn, req *http.Request) {
 		writeHTTPError(downstream, http.StatusBadGateway, err)
 		return
 	}
-	defer upstream.Close()
+	defer upstream.Close() //nolint:errcheck // best-effort close
 
 	// Tell the client the tunnel is established.
 	_, err = fmt.Fprintf(downstream, "HTTP/%d.%d 200 Connection Established\r\n\r\n",

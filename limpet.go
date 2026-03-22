@@ -412,7 +412,7 @@ func (c *Client) fetchHTTP(
 			rdr = http.MaxBytesReader(nil, resp.Body, c.respBodyLimit)
 		}
 		body, err = io.ReadAll(rdr)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			return fmt.Errorf("failed to read http resp body: %w", err)
 		}
@@ -660,7 +660,7 @@ func (c *Client) fetchBrowser(
 	if err != nil {
 		return nil, fmt.Errorf("could not create context: %w", err)
 	}
-	defer bctx.Close()
+	defer bctx.Close() //nolint:errcheck // best-effort close
 
 	fulfill := func(route playwright.Route, fn func() (*Page, error)) {
 		page, err := fn()
