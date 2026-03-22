@@ -5,8 +5,11 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"go.uber.org/ratelimit"
 )
 
 func TestParseRateLimit(t *testing.T) {
@@ -404,4 +407,44 @@ func TestErrPageStatusNotOK(t *testing.T) {
 			t.Error("error does not reference the original page")
 		}
 	})
+
+	t.Run("404 accepted when in cacheStatuses", func(t *testing.T) {
+		cl2 := &Client{cacheStatuses: map[int]bool{200: true, 404: true}}
+		page := &Page{Response: PageResponse{StatusCode: 404}}
+		if err := cl2.errPageStatusNotOK(page); err != nil {
+			t.Errorf("expected nil for cacheable 404, got: %v", err)
+		}
+	})
+}
+
+func TestDoRejectsBrowserAndStealth(t *testing.T) {
+	cl := &Client{
+		mu:        new(sync.Mutex),
+		rateLimit: ratelimit.NewUnlimited(),
+		retry:     RetryConfig{Attempts: 1, MinWait: time.Millisecond, MaxWait: time.Millisecond},
+	}
+	req, _ := http.NewRequest("GET", "http://example.com", nil)
+	_, err := cl.Do(t.Context(), req, DoConfig{Browser: true, Stealth: true})
+	if err == nil {
+		t.Fatal("expected error for Browser+Stealth, got nil")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestRetryWaitZeroJitter(t *testing.T) {
+	// Verify that zero Jitter does not panic.
+	cl := &Client{
+		retry: RetryConfig{
+			Attempts: 2,
+			MinWait:  time.Millisecond,
+			MaxWait:  10 * time.Millisecond,
+			Jitter:   0,
+		},
+	}
+	err := cl.retryWait(t.Context(), 0)
+	if err != nil {
+		t.Fatalf("retryWait with zero jitter: %v", err)
+	}
 }

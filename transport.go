@@ -311,7 +311,7 @@ func (t *Transport) fetchAndCache(
 	// 304 Not Modified: return the cached response.
 	if resp.StatusCode == 304 && cachedPage != nil {
 		resp.Body.Close()
-		cachedPage.Meta.Source = "revalidated"
+		cachedPage.Meta.Source = SourceRevalidated
 		t.stats.revalidated.Add(1)
 		return cachedPage, nil
 	}
@@ -331,7 +331,7 @@ func (t *Transport) fetchAndCache(
 	}
 
 	page := pageFromRoundTrip(req, resp, body)
-	page.Meta.Source = "fetch"
+	page.Meta.Source = SourceFetch
 
 	// Cache write with refresh pattern TTL.
 	if t.isCacheable(resp.StatusCode) && policy != CachePolicySkip {

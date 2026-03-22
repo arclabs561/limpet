@@ -30,8 +30,6 @@ import (
 	"github.com/arclabs561/limpet/blob"
 )
 
-var reNumericPrefix = regexp.MustCompile(`^\d+`)
-
 // parseRateLimit parses a rate limit string like "100", "10/1m", or "none".
 func parseRateLimit(raw string) (ratelimit.Limiter, error) {
 	switch strings.ToLower(raw) {
@@ -46,8 +44,9 @@ func parseRateLimit(raw string) (ratelimit.Limiter, error) {
 	var opts []ratelimit.Option
 	if len(parts) == 2 {
 		per := parts[1]
-		if !reNumericPrefix.MatchString(per) {
-			per = fmt.Sprintf("1%s", per)
+		// Prefix bare duration units (e.g. "s", "m") with "1" so time.ParseDuration works.
+		if len(per) > 0 && (per[0] < '0' || per[0] > '9') {
+			per = "1" + per
 		}
 		dur, err := time.ParseDuration(per)
 		if err != nil {
@@ -446,7 +445,7 @@ func (c *Client) fetchHTTP(
 	return &Page{
 		Meta: PageMeta{
 			Version:   latestPageVersion,
-			Source:    "http.plain",
+			Source:    SourceHTTPPlain,
 			FetchedAt: time.Now(),
 			FetchDur:  dur,
 		},
@@ -547,7 +546,7 @@ func (c *Client) fetchStealth(
 	return &Page{
 		Meta: PageMeta{
 			Version:   latestPageVersion,
-			Source:    "http.stealth",
+			Source:    SourceHTTPStealth,
 			FetchedAt: time.Now(),
 			FetchDur:  dur,
 		},
@@ -753,7 +752,7 @@ func (c *Client) fetchBrowser(
 	return &Page{
 		Meta: PageMeta{
 			Version:   latestPageVersion,
-			Source:    "http.browser",
+			Source:    SourceHTTPBrowser,
 			FetchedAt: time.Now(),
 		},
 		Request: PageRequest{
@@ -849,7 +848,7 @@ func (c *Client) do(
 	if err != nil {
 		// stale-if-error: return cached page on fetch failure.
 		if c.staleIfError && cachedPage != nil {
-			cachedPage.Meta.Source = "stale"
+			cachedPage.Meta.Source = SourceStale
 			return cachedPage, nil
 		}
 		return nil, fmt.Errorf("failed to fetch page: %w", err)
@@ -857,7 +856,7 @@ func (c *Client) do(
 
 	// 304 Not Modified: return the cached page if available.
 	if page.Response.StatusCode == 304 && cachedPage != nil {
-		cachedPage.Meta.Source = "revalidated"
+		cachedPage.Meta.Source = SourceRevalidated
 		return cachedPage, nil
 	}
 
@@ -1093,6 +1092,18 @@ type Limiter interface {
 
 // latestPageVersion is the current cache page schema version.
 const latestPageVersion = 1
+
+// PageMeta.Source values describing how a page was obtained.
+const (
+	SourceHTTPPlain   = "http.plain"
+	SourceHTTPStealth = "http.stealth"
+	SourceHTTPBrowser = "http.browser"
+	SourceCache       = "cache"
+	SourceRemote      = "remote"
+	SourceFetch       = "fetch"
+	SourceStale       = "stale"
+	SourceRevalidated = "revalidated"
+)
 
 // Page is a cached HTTP request/response pair with metadata.
 type Page struct {
