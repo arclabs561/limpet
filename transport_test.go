@@ -274,13 +274,12 @@ func TestTransportSingleflight(t *testing.T) {
 	bodies := make([]string, n)
 	errs := make([]error, n)
 
-	// Launch n concurrent requests for the same URL.
+	// Launch n concurrent requests for the same URL (cache misses coalesce).
 	for i := range n {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			ctx := WithCachePolicy(t.Context(), CachePolicyReplace)
-			req, _ := http.NewRequestWithContext(ctx, "GET", svr.URL+"/dedup", nil)
+			req, _ := http.NewRequestWithContext(t.Context(), "GET", svr.URL+"/dedup", nil)
 			resp, err := client.Do(req)
 			if err != nil {
 				errs[idx] = err
@@ -667,9 +666,8 @@ func TestTransportSingleflightForgetOnError(t *testing.T) {
 
 	client := &http.Client{Transport: tr}
 
-	// Launch two concurrent requests with Replace policy.
-	// Both enter singleflight. First will fail (502).
-	// With Forget, the second should be able to retry independently.
+	// Launch two concurrent requests (cache misses enter singleflight).
+	// First will fail (502). With Forget, the second should retry independently.
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
 	bodies := make([]string, 2)
@@ -678,8 +676,7 @@ func TestTransportSingleflightForgetOnError(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			ctx := WithCachePolicy(t.Context(), CachePolicyReplace)
-			req, _ := http.NewRequestWithContext(ctx, "GET", svr.URL+"/forget", nil)
+			req, _ := http.NewRequestWithContext(t.Context(), "GET", svr.URL+"/forget", nil)
 			resp, err := client.Do(req)
 			if err != nil {
 				errs[idx] = err
@@ -699,8 +696,7 @@ func TestTransportSingleflightForgetOnError(t *testing.T) {
 	// With singleflight coalescing, both may share the first failure,
 	// but subsequent independent requests should work.
 	// The key property: the key is forgotten, so future requests aren't blocked.
-	ctx := WithCachePolicy(t.Context(), CachePolicyReplace)
-	req, _ := http.NewRequestWithContext(ctx, "GET", svr.URL+"/forget", nil)
+	req, _ := http.NewRequestWithContext(t.Context(), "GET", svr.URL+"/forget", nil)
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("post-forget request should succeed: %v", err)

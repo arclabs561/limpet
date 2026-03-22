@@ -33,22 +33,17 @@ type Transport struct {
 	refreshPatterns  []RefreshPattern
 	staleIfError     bool
 	flight           singleflight.Group
-	stats            TransportStats
+	stats            transportStats
 }
 
-// TransportStats tracks cache performance counters. All fields are safe for
+// transportStats tracks cache performance counters. All fields are safe for
 // concurrent access. Read via Transport.Stats().
-type TransportStats struct {
-	// Hits counts cache hits (served from cache without fetch).
-	Hits atomic.Int64
-	// Misses counts cache misses (required a fetch).
-	Misses atomic.Int64
-	// Revalidated counts conditional requests that returned 304.
-	Revalidated atomic.Int64
-	// Coalesced counts requests served by singleflight coalescing.
-	Coalesced atomic.Int64
-	// StaleServed counts responses served from stale cache on upstream error.
-	StaleServed atomic.Int64
+type transportStats struct {
+	hits        atomic.Int64
+	misses      atomic.Int64
+	revalidated atomic.Int64
+	coalesced   atomic.Int64
+	staleServed atomic.Int64
 }
 
 // TransportOption configures a Transport.
@@ -132,11 +127,11 @@ func NewTransport(bucket *blob.Bucket, opts ...TransportOption) *Transport {
 // Stats returns a snapshot of the transport's cache performance counters.
 func (t *Transport) Stats() TransportStatsSnapshot {
 	return TransportStatsSnapshot{
-		Hits:        t.stats.Hits.Load(),
-		Misses:      t.stats.Misses.Load(),
-		Revalidated: t.stats.Revalidated.Load(),
-		Coalesced:   t.stats.Coalesced.Load(),
-		StaleServed: t.stats.StaleServed.Load(),
+		Hits:        t.stats.hits.Load(),
+		Misses:      t.stats.misses.Load(),
+		Revalidated: t.stats.revalidated.Load(),
+		Coalesced:   t.stats.coalesced.Load(),
+		StaleServed: t.stats.staleServed.Load(),
 	}
 }
 
@@ -222,13 +217,13 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("limpet: failed to compute cache key: %w", err)
 	}
 
-	// Single cache read: return on hit (Default policy), or keep for
-	// conditional request headers (Replace policy).
+	// Cache read: return on hit (Default policy), or keep for conditional
+	// request headers (Replace policy).
 	var cachedPage *Page
 	if policy != CachePolicySkip {
 		if page, err := readCachedPage(req.Context(), t.bucket, key); err == nil {
 			if policy == CachePolicyDefault {
-				t.stats.Hits.Add(1)
+				t.stats.hits.Add(1)
 				resp := page.HTTPResponse()
 				resp.Header.Set("X-Limpet-Source", page.Meta.Source)
 				return resp, nil
@@ -243,90 +238,117 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				req.Header.Set("If-Modified-Since", lm)
 			}
 		} else if policy == CachePolicyDefault {
-			t.stats.Misses.Add(1)
+			t.stats.misses.Add(1)
 		}
 	}
 
-	// Singleflight: coalesce concurrent requests for the same cache key.
-	// The flight returns a *Page so each caller gets an independent response.
-	type flightResult struct {
-		page   *Page
-		source string
-	}
-	v, err, shared := t.flight.Do(key, func() (any, error) {
-		// Rate limit.
-		if t.rateLimit != nil {
-			t.rateLimit.Take()
-		}
-
-		// Delegate to base transport.
-		resp, err := t.base().RoundTrip(req)
+	// Replace-policy requests bypass singleflight: they carry per-caller
+	// conditional headers and a per-caller cachedPage for 304 handling.
+	// Coalescing them with cache-miss requests would leak one caller's
+	// state into another's flight.
+	if policy == CachePolicyReplace {
+		page, err := t.fetchAndCache(req, key, policy, cachedPage)
 		if err != nil {
-			// Forget the key so the next waiter retries independently
-			// instead of all waiters receiving this transient error.
+			if t.staleIfError && cachedPage != nil {
+				t.stats.staleServed.Add(1)
+				resp := cachedPage.HTTPResponse()
+				resp.Header.Set("X-Limpet-Source", "stale")
+				return resp, nil
+			}
+			return nil, err
+		}
+		resp := page.HTTPResponse()
+		resp.Header.Set("X-Limpet-Source", page.Meta.Source)
+		return resp, nil
+	}
+
+	// Default/Skip: coalesce concurrent requests via singleflight.
+	v, err, shared := t.flight.Do(key, func() (any, error) {
+		page, err := t.fetchAndCache(req, key, policy, nil)
+		if err != nil {
 			t.flight.Forget(key)
 			return nil, err
 		}
-
-		// 304 Not Modified: return the cached response.
-		if resp.StatusCode == 304 && cachedPage != nil {
-			resp.Body.Close()
-			return &flightResult{page: cachedPage, source: "revalidated"}, nil
-		}
-
-		// Buffer the response body for caching.
-		var body []byte
-		if resp.Body != nil {
-			rdr := resp.Body
-			if t.respBodyLimit > 0 {
-				rdr = http.MaxBytesReader(nil, resp.Body, t.respBodyLimit)
-			}
-			body, err = io.ReadAll(rdr)
-			resp.Body.Close()
-			if err != nil {
-				return nil, fmt.Errorf("limpet: failed to read response body: %w", err)
-			}
-		}
-
-		page := pageFromRoundTrip(req, resp, body)
-
-		// Cache write with refresh pattern TTL.
-		if t.isCacheable(resp.StatusCode) && policy != CachePolicySkip {
-			writeCtx := req.Context()
-			if len(t.refreshPatterns) > 0 {
-				if _, hasCtxTTL := writeCtx.Value(blob.CacheTTLKey{}).(time.Duration); !hasCtxTTL {
-					if ttl, ok := matchRefreshTTL(t.refreshPatterns, req.URL.String()); ok {
-						writeCtx = blob.WithCacheTTL(writeCtx, ttl)
-					}
-				}
-			}
-			if err := writeCachedPage(writeCtx, t.bucket, key, page); err != nil {
-				return nil, fmt.Errorf("failed to write cache: %w", err)
-			}
-		}
-
-		return &flightResult{page: page, source: "fetch"}, nil
+		return page, nil
 	})
 	if err != nil {
 		// stale-if-error: return cached page on upstream failure.
 		if t.staleIfError && cachedPage != nil {
-			t.stats.StaleServed.Add(1)
+			t.stats.staleServed.Add(1)
 			resp := cachedPage.HTTPResponse()
 			resp.Header.Set("X-Limpet-Source", "stale")
 			return resp, nil
 		}
 		return nil, err
 	}
-	result := v.(*flightResult)
+	result := v.(*Page)
 	if shared {
-		t.stats.Coalesced.Add(1)
+		t.stats.coalesced.Add(1)
 	}
-	if result.source == "revalidated" {
-		t.stats.Revalidated.Add(1)
-	}
-	resp := result.page.HTTPResponse()
-	resp.Header.Set("X-Limpet-Source", result.source)
+	resp := result.HTTPResponse()
+	resp.Header.Set("X-Limpet-Source", result.Meta.Source)
 	return resp, nil
+}
+
+// fetchAndCache performs an HTTP round-trip, handles 304 revalidation,
+// buffers the body, and writes to cache. Used by both the singleflight
+// path and the direct Replace-policy path.
+func (t *Transport) fetchAndCache(
+	req *http.Request,
+	key string,
+	policy CachePolicy,
+	cachedPage *Page,
+) (*Page, error) {
+	if t.rateLimit != nil {
+		t.rateLimit.Take()
+	}
+
+	resp, err := t.base().RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// 304 Not Modified: return the cached response.
+	if resp.StatusCode == 304 && cachedPage != nil {
+		resp.Body.Close()
+		cachedPage.Meta.Source = "revalidated"
+		t.stats.revalidated.Add(1)
+		return cachedPage, nil
+	}
+
+	// Buffer the response body for caching.
+	var body []byte
+	if resp.Body != nil {
+		rdr := resp.Body
+		if t.respBodyLimit > 0 {
+			rdr = http.MaxBytesReader(nil, resp.Body, t.respBodyLimit)
+		}
+		body, err = io.ReadAll(rdr)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("limpet: failed to read response body: %w", err)
+		}
+	}
+
+	page := pageFromRoundTrip(req, resp, body)
+	page.Meta.Source = "fetch"
+
+	// Cache write with refresh pattern TTL.
+	if t.isCacheable(resp.StatusCode) && policy != CachePolicySkip {
+		writeCtx := req.Context()
+		if len(t.refreshPatterns) > 0 {
+			if _, hasCtxTTL := writeCtx.Value(blob.CacheTTLKey{}).(time.Duration); !hasCtxTTL {
+				if ttl, ok := matchRefreshTTL(t.refreshPatterns, req.URL.String()); ok {
+					writeCtx = blob.WithCacheTTL(writeCtx, ttl)
+				}
+			}
+		}
+		if err := writeCachedPage(writeCtx, t.bucket, key, page); err != nil {
+			return nil, fmt.Errorf("failed to write cache: %w", err)
+		}
+	}
+
+	return page, nil
 }
 
 // pageFromRoundTrip constructs a Page from a raw HTTP round-trip result.
