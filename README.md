@@ -57,11 +57,17 @@ limpet proxy --allow-private
 # List cached entries
 limpet cache ls
 
+# List as JSON
+limpet cache ls --json
+
 # List cached entries for a specific host
 limpet cache ls example.com
 
 # Read a cached page's response body
 limpet cache get example.com/abc123.json
+
+# Include response headers
+limpet cache get -i example.com/abc123.json
 
 # Show page metadata (URL, status, fetch time)
 limpet cache get --meta example.com/abc123.json
@@ -258,6 +264,11 @@ tr := limpet.NewTransport(bucket,
     limpet.TransportWithRequestBodyLimit(10e6),   // 10 MB (default)
     limpet.TransportWithResponseBodyLimit(100e6), // 100 MB (default)
     limpet.TransportWithIgnoreHeaders("User-Agent", "Accept-Encoding"),
+    limpet.TransportWithIgnoreParams("_t", "utm_source"),
+    limpet.TransportWithCacheStatuses(200, 301, 404),
+    limpet.TransportWithUserAgent("mybot/1.0"),
+    limpet.TransportWithRefreshPatterns(/* ... */),
+    limpet.TransportWithStaleIfError(true),
 )
 
 client := &http.Client{Transport: tr}
@@ -265,6 +276,14 @@ client := &http.Client{Transport: tr}
 // First call fetches and caches. Second call returns from cache.
 resp, _ := client.Get("https://example.com")
 // resp.Header.Get("X-Limpet-Source") == "fetch", "cache", "revalidated", or "stale"
+```
+
+Cache performance counters:
+
+```go
+stats := tr.Stats()
+fmt.Printf("hits=%d misses=%d revalidated=%d coalesced=%d stale=%d\n",
+    stats.Hits, stats.Misses, stats.Revalidated, stats.Coalesced, stats.StaleServed)
 ```
 
 Per-request cache control via context:

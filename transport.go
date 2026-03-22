@@ -15,7 +15,8 @@ import (
 )
 
 // Transport is an http.RoundTripper that caches responses in a blob.Bucket.
-// Responses are fully buffered (no streaming). Only HTTP 200 responses are cached.
+// Responses are fully buffered (no streaming). By default only HTTP 200
+// responses are cached; use TransportWithCacheStatuses to cache other codes.
 //
 // Use WithCachePolicy on the request context to control per-request caching.
 type Transport struct {
