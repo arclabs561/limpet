@@ -30,6 +30,12 @@ func init() {
 		false,
 		"whether to use browser automation",
 	)
+	doCmd.Flags().BoolP(
+		"stealth",
+		"S",
+		false,
+		"use stealth transport (browser TLS fingerprint, bypasses Cloudflare)",
+	)
 	doCmd.Flags().StringP(
 		"method",
 		"X",
@@ -64,6 +70,7 @@ func doRunE(cmd *cobra.Command, args []string) error {
 	}
 	method := mustFlagString(cmd, "method")
 	browser := mustFlagBool(cmd, "browser")
+	stealth := mustFlagBool(cmd, "stealth")
 	forceRefetch := mustFlagBool(cmd, "force-refetch")
 	head := mustFlagBool(cmd, "head")
 	if head {
@@ -75,6 +82,7 @@ func doRunE(cmd *cobra.Command, args []string) error {
 	}
 	cfg := limpet.DoConfig{
 		Browser: browser,
+		Stealth: stealth,
 		Replace: forceRefetch,
 	}
 	log.Info().Interface("cfg", cfg).Msgf("fetching %s", args[0])

@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	azuretls "github.com/Noooste/azuretls-client"
 	"github.com/playwright-community/playwright-go"
 	"github.com/rs/zerolog/log"
 	"go.uber.org/ratelimit"
@@ -65,6 +66,7 @@ type Client struct {
 	pw               *playwright.Playwright
 	browser          playwright.Browser
 	alwaysDoBrowser  bool
+	alwaysDoStealth  bool
 	chromiumSandbox  bool
 	startBrowser     func() error
 	requestBodyLimit int64 // no limit when <= 0
@@ -87,6 +89,13 @@ type Option func(*Client)
 // WithBrowser configures the client to always use headless browser.
 func WithBrowser() Option {
 	return func(c *Client) { c.alwaysDoBrowser = true }
+}
+
+// WithStealth configures the client to always use the stealth (azuretls)
+// transport, which presents a real browser TLS fingerprint to bypass
+// Cloudflare and similar bot-detection systems.
+func WithStealth() Option {
+	return func(c *Client) { c.alwaysDoStealth = true }
 }
 
 // WithChromiumSandbox controls whether the headless Chromium browser runs
@@ -329,6 +338,9 @@ func (c *Client) Do(
 		if c.Browser {
 			cfg.Browser = true
 		}
+		if c.Stealth {
+			cfg.Stealth = true
+		}
 		if c.Archive {
 			cfg.Archive = true
 		}
@@ -346,6 +358,9 @@ func (c *Client) Do(
 		Limiter:          cfg.Limiter,
 	}
 	fn := c.fetchHTTP
+	if cfg.Stealth || c.alwaysDoStealth {
+		fn = c.fetchStealth
+	}
 	if cfg.Browser {
 		fn = c.fetchBrowser
 	}
@@ -529,6 +544,143 @@ func (c *Client) fetchHTTP(
 			Body:             body,
 			ContentLength:    resp.ContentLength,
 			Header:           resp.Header,
+		},
+	}, nil
+}
+
+func (c *Client) fetchStealth(
+	ctx context.Context,
+	req *http.Request,
+	reqBody []byte,
+	opts doOptions,
+) (*Page, error) {
+	start := time.Now()
+
+	session := azuretls.NewSessionWithContext(ctx)
+	defer session.Close()
+
+	session.Browser = azuretls.Chrome
+
+	// Honor proxy from environment (same as plain HTTP transport).
+	if proxy := os.Getenv("HTTPS_PROXY"); proxy != "" {
+		if err := session.SetProxy(proxy); err != nil {
+			return nil, fmt.Errorf("stealth: failed to set proxy: %w", err)
+		}
+	} else if proxy := os.Getenv("HTTP_PROXY"); proxy != "" {
+		if err := session.SetProxy(proxy); err != nil {
+			return nil, fmt.Errorf("stealth: failed to set proxy: %w", err)
+		}
+	}
+
+	// Copy headers from the stdlib request into azuretls ordered headers.
+	var oh azuretls.OrderedHeaders
+	for key, vals := range req.Header {
+		for _, v := range vals {
+			oh = append(oh, []string{key, v})
+		}
+	}
+	if c.userAgent != "" && req.Header.Get("User-Agent") == "" {
+		oh = append(oh, []string{"User-Agent", c.userAgent})
+	}
+
+	azReq := &azuretls.Request{
+		Method:         req.Method,
+		Url:            req.URL.String(),
+		OrderedHeaders: oh,
+	}
+	if len(reqBody) > 0 {
+		azReq.Body = reqBody
+	}
+
+	var azResp *azuretls.Response
+	var err error
+	retry := c.retry
+	wait := func(attempt int) error {
+		d := time.Duration(math.Pow(2, float64(attempt))) * retry.MinWait
+		d += time.Duration(rand.Intn(int(retry.Jitter)))
+		if d > retry.MaxWait {
+			d = retry.MaxWait
+		}
+		t := time.After(d)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t:
+			return nil
+		}
+	}
+	for i := 0; i < retry.Attempts; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		val, ok := req.Context().Value(ctxKeyLimiter{}).(ctxValLimiter)
+		if ok {
+			val.Limiter.Take()
+		} else {
+			c.rateLimit.Take()
+		}
+		c.requests.Add(1)
+
+		azResp, err = session.Do(azReq)
+		if err != nil {
+			if lastAttempt := i >= retry.Attempts-1; lastAttempt {
+				return nil, fmt.Errorf("stealth: request failed: %w", err)
+			}
+			log.Warn().Err(err).Int("attempt", i).Msg("stealth request failed, retrying")
+			if err := wait(i); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if opts.ReSilentThrottle != nil && opts.ReSilentThrottle.Match(azResp.Body) {
+			n := c.requests.Load()
+			rate := float64(n) / (time.Since(c.startedAt).Minutes())
+			log.Warn().
+				Str("rate", fmt.Sprintf("%0.3f/m", rate)).
+				Msg("silently throttled (stealth)")
+			if lastAttempt := i >= retry.Attempts-1; lastAttempt {
+				return nil, &ThrottledError{}
+			}
+			log.Warn().Int("attempt", i).Msg("response is silently throttled, retrying")
+			if err := wait(i); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		break
+	}
+
+	redirect := ""
+	if azResp.Url != req.URL.String() {
+		redirect = azResp.Url
+	}
+
+	// Convert fhttp.Header (azuretls fork) to net/http.Header.
+	respHeader := make(http.Header, len(azResp.Header))
+	for k, v := range azResp.Header {
+		respHeader[k] = v
+	}
+
+	dur := time.Since(start)
+	return &Page{
+		Meta: PageMeta{
+			Version:   latestPageVersion,
+			Source:    "http.stealth",
+			FetchedAt: time.Now(),
+			FetchDur:  dur,
+		},
+		Request: PageRequest{
+			URL:           req.URL.String(),
+			RedirectedURL: redirect,
+			Method:        req.Method,
+			Header:        req.Header,
+			Body:          reqBody,
+		},
+		Response: PageResponse{
+			StatusCode:    azResp.StatusCode,
+			Body:          azResp.Body,
+			ContentLength: int64(len(azResp.Body)),
+			Header:        respHeader,
 		},
 	}, nil
 }
@@ -959,6 +1111,9 @@ type DoConfig struct {
 	Replace bool
 	// Browser uses headless Chromium instead of plain HTTP.
 	Browser bool
+	// Stealth uses azuretls with a real browser TLS fingerprint to bypass
+	// Cloudflare and similar bot-detection systems. Mutually exclusive with Browser.
+	Stealth bool
 	// Archive stores a timestamped snapshot alongside the latest cache entry.
 	// Use Client.Versions to list snapshots and detect changes over time.
 	Archive bool
