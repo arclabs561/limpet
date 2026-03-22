@@ -380,16 +380,19 @@ func TestPageStaleAfter(t *testing.T) {
 }
 
 func TestErrPageStatusNotOK(t *testing.T) {
+	// Use a default Client (only 200 is cacheable/accepted).
+	cl := &Client{}
+
 	t.Run("200 returns nil", func(t *testing.T) {
 		page := &Page{Response: PageResponse{StatusCode: 200}}
-		if err := errPageStatusNotOK(page); err != nil {
+		if err := cl.errPageStatusNotOK(page); err != nil {
 			t.Errorf("expected nil error for 200, got: %v", err)
 		}
 	})
 
 	t.Run("404 returns error", func(t *testing.T) {
 		page := &Page{Response: PageResponse{StatusCode: 404}}
-		err := errPageStatusNotOK(page)
+		err := cl.errPageStatusNotOK(page)
 		if err == nil {
 			t.Fatal("expected error for 404, got nil")
 		}
