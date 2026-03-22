@@ -27,3 +27,11 @@ linters:
       rules:
       - name: unused-parameter
         disabled: true
+  exclusions:
+    rules:
+    - path: _test\.go
+      linters:
+      - errcheck
+    - path: cmd/
+      linters:
+      - errcheck
