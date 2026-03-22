@@ -8,13 +8,13 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.4
 	github.com/dgraph-io/badger/v3 v3.2103.5
 	github.com/klauspost/compress v1.18.4
-	github.com/mattn/go-isatty v0.0.20
 	github.com/playwright-community/playwright-go v0.5700.1
 	github.com/rs/zerolog v1.34.0
 	github.com/spf13/cobra v1.10.2
 	go.uber.org/ratelimit v0.3.1
 	gocloud.dev v0.45.0
 	golang.org/x/sync v0.19.0
+	golang.org/x/term v0.41.0
 )
 
 require (
@@ -68,6 +68,7 @@ require (
 	github.com/googleapis/gax-go/v2 v2.17.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/refraction-networking/utls v1.8.1 // indirect
@@ -81,7 +82,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.42.0 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/net v0.51.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/api v0.269.0 // indirect

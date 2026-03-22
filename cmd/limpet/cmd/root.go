@@ -11,8 +11,8 @@ import (
 
 	"github.com/arclabs561/limpet"
 	"github.com/arclabs561/limpet/blob"
-	"github.com/mattn/go-isatty"
 	"github.com/rs/zerolog"
+	"golang.org/x/term"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 )
@@ -116,7 +116,7 @@ func initLogger(ctx context.Context, opts loggerOptions) (context.Context, zerol
 
 	doConsole := false
 	out := os.Stderr
-	isTerm := isatty.IsTerminal(out.Fd())
+	isTerm := term.IsTerminal(int(out.Fd()))
 	switch strings.TrimSpace(strings.ToLower(opts.Format)) {
 	case "", "auto":
 		doConsole = isTerm
