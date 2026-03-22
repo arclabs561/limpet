@@ -296,7 +296,11 @@ func (c *Client) Get(ctx context.Context, url string, cfgs ...DoConfig) (*Page, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	return c.Do(ctx, req, cfgs...)
+	var cfg DoConfig
+	if len(cfgs) > 0 {
+		cfg = cfgs[0]
+	}
+	return c.Do(ctx, req, cfg)
 }
 
 // StatusError is returned when the HTTP status is not 200 OK. The
@@ -309,11 +313,14 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("bad fetch status: %d", e.Page.Response.StatusCode)
 }
 
-func errPageStatusNotOK(page *Page) error {
-	if page.Response.StatusCode != 200 {
-		return &StatusError{Page: page}
+// errPageStatusNotOK returns a StatusError if the page's status code is not
+// in the set of accepted statuses. By default only 200 is accepted. When
+// WithCacheStatuses is configured, all cacheable statuses are accepted.
+func (c *Client) errPageStatusNotOK(page *Page) error {
+	if c.isCacheable(page.Response.StatusCode) {
+		return nil
 	}
-	return nil
+	return &StatusError{Page: page}
 }
 
 // ThrottledError is returned when the fetch is throttled.
@@ -324,47 +331,22 @@ func (e *ThrottledError) Error() string {
 }
 
 // Do fetches the given request, returning a cached result if available.
-// Pass a DoConfig to control caching, browser mode, and rate limiting.
 func (c *Client) Do(
 	ctx context.Context,
 	req *http.Request,
-	cfgs ...DoConfig,
+	cfg DoConfig,
 ) (page *Page, err error) {
-	var cfg DoConfig
-	for _, c := range cfgs {
-		if c.Replace {
-			cfg.Replace = true
-		}
-		if c.Browser {
-			cfg.Browser = true
-		}
-		if c.Stealth {
-			cfg.Stealth = true
-		}
-		if c.Archive {
-			cfg.Archive = true
-		}
-		if c.SilentThrottle != nil {
-			cfg.SilentThrottle = c.SilentThrottle
-		}
-		if c.Limiter != nil {
-			cfg.Limiter = c.Limiter
-		}
-	}
-	opts := doOptions{
-		Replace:          cfg.Replace,
-		Archive:          cfg.Archive,
-		ReSilentThrottle: cfg.SilentThrottle,
-		Limiter:          cfg.Limiter,
+	if cfg.Browser && cfg.Stealth {
+		return nil, fmt.Errorf("limpet: Browser and Stealth are mutually exclusive")
 	}
 	fn := c.fetchHTTP
 	if cfg.Stealth || c.alwaysDoStealth {
 		fn = c.fetchStealth
 	}
-	if cfg.Browser {
+	if cfg.Browser || c.alwaysDoBrowser {
 		fn = c.fetchBrowser
 	}
-	return c.do(ctx, req, opts, fn)
+	return c.do(ctx, req, cfg, fn)
 }
 
 func (c *Client) newBrowser() (err error) {
@@ -415,71 +397,31 @@ func (c *Client) closeBrowser() {
 	}
 }
 
-type doOptions struct {
-	Replace          bool
-	Archive          bool
-	ReSilentThrottle *regexp.Regexp
-	Limiter          Limiter
-}
-
 type fetchFn func(
 	ctx context.Context,
 	req *http.Request,
 	reqBody []byte,
-	opts doOptions,
+	cfg DoConfig,
 ) (*Page, error)
 
 func (c *Client) fetchHTTP(
 	ctx context.Context,
 	req *http.Request,
 	reqBody []byte,
-	opts doOptions,
+	cfg DoConfig,
 ) (*Page, error) {
 	start := time.Now()
 
 	var resp *http.Response
 	var body []byte
-	var err error
-	retry := c.retry
-	wait := func(attempt int) error {
-		d := time.Duration(math.Pow(2, float64(attempt))) * retry.MinWait
-		d += time.Duration(rand.Intn(int(retry.Jitter)))
-		if d > retry.MaxWait {
-			d = retry.MaxWait
-		}
-		t := time.After(d)
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-t:
-			return nil
-		}
-	}
-	for i := 0; i < retry.Attempts; i++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		// Apply rate limiting before each attempt.
-		val, ok := req.Context().Value(ctxKeyLimiter{}).(ctxValLimiter)
-		if ok {
-			val.Limiter.Take()
-		} else {
-			c.rateLimit.Take()
-		}
-		c.requests.Add(1)
+	err := c.retryDo(ctx, req, cfg, func() error {
+		var err error
+		// Restore request body for each attempt.
+		req.Body = io.NopCloser(bytes.NewReader(reqBody))
 
 		resp, err = c.httpClient.Do(req)
 		if err != nil {
-			if lastAttempt := i >= retry.Attempts-1; lastAttempt {
-				return nil, fmt.Errorf("failed to perform http request: %w", err)
-			}
-			log.Warn().Err(err).Int("attempt", i).Msg("http request failed, retrying")
-			if err := wait(i); err != nil {
-				return nil, err
-			}
-			// Restore request body for retry.
-			req.Body = io.NopCloser(bytes.NewReader(reqBody))
-			continue
+			return fmt.Errorf("failed to perform http request: %w", err)
 		}
 		rdr := resp.Body
 		if c.respBodyLimit > 0 {
@@ -487,33 +429,13 @@ func (c *Client) fetchHTTP(
 		}
 		body, err = io.ReadAll(rdr)
 		resp.Body.Close()
-		lastAttempt := i >= retry.Attempts-1
 		if err != nil {
-			if lastAttempt {
-				return nil, fmt.Errorf("failed to read http resp body: %w", err)
-			}
-			log.Warn().Err(err).Int("attempt", i).Msg("failed to read http resp body, retrying")
-			if err := wait(i); err != nil {
-				return nil, err
-			}
-			continue
+			return fmt.Errorf("failed to read http resp body: %w", err)
 		}
-		if opts.ReSilentThrottle != nil && opts.ReSilentThrottle.Match(body) {
-			n := c.requests.Load()
-			rate := float64(n) / (time.Since(c.startedAt).Minutes())
-			log.Warn().
-				Str("rate", fmt.Sprintf("%0.3f/m", rate)).
-				Msg("silently throttled")
-			if lastAttempt {
-				return nil, &ThrottledError{}
-			}
-			log.Warn().Int("attempt", i).Msg("response is silently throttled, retrying")
-			if err := wait(i); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		break
+		return nil
+	}, func() []byte { return body })
+	if err != nil {
+		return nil, err
 	}
 
 	redirect := ""
@@ -552,7 +474,7 @@ func (c *Client) fetchStealth(
 	ctx context.Context,
 	req *http.Request,
 	reqBody []byte,
-	opts doOptions,
+	cfg DoConfig,
 ) (*Page, error) {
 	start := time.Now()
 
@@ -593,61 +515,21 @@ func (c *Client) fetchStealth(
 	}
 
 	var azResp *azuretls.Response
-	var err error
-	retry := c.retry
-	wait := func(attempt int) error {
-		d := time.Duration(math.Pow(2, float64(attempt))) * retry.MinWait
-		d += time.Duration(rand.Intn(int(retry.Jitter)))
-		if d > retry.MaxWait {
-			d = retry.MaxWait
-		}
-		t := time.After(d)
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-t:
-			return nil
-		}
-	}
-	for i := 0; i < retry.Attempts; i++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		val, ok := req.Context().Value(ctxKeyLimiter{}).(ctxValLimiter)
-		if ok {
-			val.Limiter.Take()
-		} else {
-			c.rateLimit.Take()
-		}
-		c.requests.Add(1)
-
+	err := c.retryDo(ctx, req, cfg, func() error {
+		var err error
 		azResp, err = session.Do(azReq)
 		if err != nil {
-			if lastAttempt := i >= retry.Attempts-1; lastAttempt {
-				return nil, fmt.Errorf("stealth: request failed: %w", err)
-			}
-			log.Warn().Err(err).Int("attempt", i).Msg("stealth request failed, retrying")
-			if err := wait(i); err != nil {
-				return nil, err
-			}
-			continue
+			return fmt.Errorf("stealth: request failed: %w", err)
 		}
-		if opts.ReSilentThrottle != nil && opts.ReSilentThrottle.Match(azResp.Body) {
-			n := c.requests.Load()
-			rate := float64(n) / (time.Since(c.startedAt).Minutes())
-			log.Warn().
-				Str("rate", fmt.Sprintf("%0.3f/m", rate)).
-				Msg("silently throttled (stealth)")
-			if lastAttempt := i >= retry.Attempts-1; lastAttempt {
-				return nil, &ThrottledError{}
-			}
-			log.Warn().Int("attempt", i).Msg("response is silently throttled, retrying")
-			if err := wait(i); err != nil {
-				return nil, err
-			}
-			continue
+		return nil
+	}, func() []byte {
+		if azResp != nil {
+			return azResp.Body
 		}
-		break
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	redirect := ""
@@ -685,11 +567,88 @@ func (c *Client) fetchStealth(
 	}, nil
 }
 
+// retryDo runs attempt up to c.retry.Attempts times with exponential backoff.
+// It handles rate limiting and silent throttle detection. The bodyFn returns
+// the response body for throttle pattern matching (called only on success).
+func (c *Client) retryDo(
+	ctx context.Context,
+	req *http.Request,
+	cfg DoConfig,
+	attempt func() error,
+	bodyFn func() []byte,
+) error {
+	retry := c.retry
+	for i := 0; i < retry.Attempts; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Rate limit.
+		if val, ok := req.Context().Value(ctxKeyLimiter{}).(ctxValLimiter); ok {
+			val.Limiter.Take()
+		} else {
+			c.rateLimit.Take()
+		}
+		c.requests.Add(1)
+
+		err := attempt()
+		lastAttempt := i >= retry.Attempts-1
+		if err != nil {
+			if lastAttempt {
+				return err
+			}
+			log.Warn().Err(err).Int("attempt", i).Msg("request failed, retrying")
+			if err := c.retryWait(ctx, i); err != nil {
+				return err
+			}
+			continue
+		}
+		// Silent throttle detection.
+		if cfg.SilentThrottle != nil {
+			if body := bodyFn(); cfg.SilentThrottle.Match(body) {
+				n := c.requests.Load()
+				rate := float64(n) / (time.Since(c.startedAt).Minutes())
+				log.Warn().
+					Str("rate", fmt.Sprintf("%0.3f/m", rate)).
+					Msg("silently throttled")
+				if lastAttempt {
+					return &ThrottledError{}
+				}
+				log.Warn().Int("attempt", i).Msg("response is silently throttled, retrying")
+				if err := c.retryWait(ctx, i); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		return nil
+	}
+	return fmt.Errorf("retry loop completed with 0 attempts")
+}
+
+// retryWait performs exponential backoff with jitter for the given attempt number.
+func (c *Client) retryWait(ctx context.Context, attempt int) error {
+	retry := c.retry
+	d := time.Duration(math.Pow(2, float64(attempt))) * retry.MinWait
+	if retry.Jitter > 0 {
+		d += time.Duration(rand.Intn(int(retry.Jitter)))
+	}
+	if d > retry.MaxWait {
+		d = retry.MaxWait
+	}
+	t := time.After(d)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t:
+		return nil
+	}
+}
+
 func (c *Client) fetchBrowser(
 	ctx context.Context,
 	req *http.Request,
 	reqBody []byte,
-	opts doOptions,
+	cfg DoConfig,
 ) (*Page, error) {
 	// Hold the mutex while checking/starting the browser to avoid a data race
 	// with closeBrowser (which also writes c.browser under mu).
@@ -755,7 +714,7 @@ func (c *Client) fetchBrowser(
 			for k, v := range req.Headers() {
 				r.Header.Set(k, v)
 			}
-			return c.fetchHTTP(ctx, r, reqBody, opts)
+			return c.fetchHTTP(ctx, r, reqBody, cfg)
 		})
 	})
 	if err != nil {
@@ -839,7 +798,7 @@ func writeCachedPage(ctx context.Context, bucket *blob.Bucket, key string, page 
 func (c *Client) do(
 	ctx context.Context,
 	req *http.Request,
-	opts doOptions,
+	cfg DoConfig,
 	fetchFn fetchFn,
 ) (page *Page, err error) {
 	start := time.Now()
@@ -860,8 +819,8 @@ func (c *Client) do(
 	// cached page for ETag/Last-Modified headers and 304 handling.
 	var cachedPage *Page
 	if cp, err := readCachedPage(ctx, c.bucket, bkey); err == nil {
-		if !opts.Replace {
-			if err := errPageStatusNotOK(cp); err != nil {
+		if !cfg.Replace {
+			if err := c.errPageStatusNotOK(cp); err != nil {
 				return nil, err
 			}
 			return cp, nil
@@ -874,19 +833,19 @@ func (c *Client) do(
 			req = req.Clone(req.Context())
 			req.Header.Set("If-Modified-Since", lm)
 		}
-	} else if !opts.Replace {
+	} else if !cfg.Replace {
 		var notFound *blob.NotFoundError
 		if !errors.As(err, &notFound) {
 			return nil, fmt.Errorf("failed to read from blob: %w", err)
 		}
 	}
 
-	if opts.Limiter != nil {
+	if cfg.Limiter != nil {
 		rctx := req.Context()
-		rctx = context.WithValue(rctx, ctxKeyLimiter{}, ctxValLimiter{opts.Limiter})
+		rctx = context.WithValue(rctx, ctxKeyLimiter{}, ctxValLimiter{cfg.Limiter})
 		req = req.WithContext(rctx)
 	}
-	page, err = fetchFn(ctx, req, reqBody, opts)
+	page, err = fetchFn(ctx, req, reqBody, cfg)
 	if err != nil {
 		// stale-if-error: return cached page on fetch failure.
 		if c.staleIfError && cachedPage != nil {
@@ -918,7 +877,7 @@ func (c *Client) do(
 			return nil, fmt.Errorf("failed to write page: %w", err)
 		}
 		// Write a timestamped archive snapshot for version history.
-		if opts.Archive {
+		if cfg.Archive {
 			akey := archiveKey(bkey, page.Meta.FetchedAt)
 			if err := writeCachedPage(ctx, c.bucket, akey, page); err != nil {
 				log.Warn().Err(err).Str("key", akey).Msg("failed to write archive snapshot")
@@ -933,10 +892,9 @@ func (c *Client) do(
 		Int("resp_bytes", len(page.Response.Body)).
 		Stringer("dur", time.Since(start).Round(time.Millisecond)).
 		Str("content_type", page.Response.Header.Get("Content-Type")).
-		Str("req_body", string(reqBody)).
 		Msg("fetched page")
 
-	if err := errPageStatusNotOK(page); err != nil {
+	if err := c.errPageStatusNotOK(page); err != nil {
 		return nil, err
 	}
 	return page, nil
@@ -1027,7 +985,6 @@ func archivePrefix(bkey string) string {
 type PageVersion struct {
 	Key       string    // Cache key for this snapshot.
 	FetchedAt time.Time // When this snapshot was fetched.
-	BodyHash  string    // SHA-256 hex digest of the response body.
 }
 
 // Versions lists all archived snapshots for the given request, ordered by
@@ -1194,6 +1151,10 @@ func (p *Page) StaleAfter(maxAge time.Duration) bool {
 // HTTPResponse reconstructs a standard *http.Response from the cached page.
 // The returned response has its own header map (safe for concurrent use).
 func (p *Page) HTTPResponse() *http.Response {
+	var trailer http.Header
+	if p.Response.Trailer != nil {
+		trailer = p.Response.Trailer.Clone()
+	}
 	return &http.Response{
 		StatusCode:       p.Response.StatusCode,
 		ProtoMajor:       p.Response.ProtoMajor,
@@ -1202,7 +1163,7 @@ func (p *Page) HTTPResponse() *http.Response {
 		Body:             io.NopCloser(bytes.NewReader(p.Response.Body)),
 		ContentLength:    p.Response.ContentLength,
 		TransferEncoding: p.Response.TransferEncoding,
-		Trailer:          p.Response.Trailer,
+		Trailer:          trailer,
 	}
 }
 

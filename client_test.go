@@ -113,7 +113,7 @@ func TestClientStaleIfError(t *testing.T) {
 
 	// Populate cache.
 	req, _ := http.NewRequest("GET", svr.URL+"/stale", nil)
-	page, err := cl.Do(t.Context(), req)
+	page, err := cl.Do(t.Context(), req, DoConfig{})
 	if err != nil {
 		t.Fatalf("populate: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestClientStaleIfErrorDisabled(t *testing.T) {
 
 	// Populate cache.
 	req, _ := http.NewRequest("GET", svr.URL+"/no-stale", nil)
-	_, err = cl.Do(t.Context(), req)
+	_, err = cl.Do(t.Context(), req, DoConfig{})
 	if err != nil {
 		t.Fatalf("populate: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestClientRefreshPatterns(t *testing.T) {
 
 	// Fetch /stable: should be cached with long TTL.
 	req, _ := http.NewRequest("GET", svr.URL+"/stable", nil)
-	page, err := cl.Do(t.Context(), req)
+	page, err := cl.Do(t.Context(), req, DoConfig{})
 	if err != nil {
 		t.Fatalf("stable fetch: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestClientRefreshPatterns(t *testing.T) {
 	}
 
 	// Fetch /stable again: should hit cache.
-	page, err = cl.Do(t.Context(), req)
+	page, err = cl.Do(t.Context(), req, DoConfig{})
 	if err != nil {
 		t.Fatalf("stable cached: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestClientRefreshPatterns(t *testing.T) {
 
 	// Fetch /ephemeral: cached with 1ms TTL.
 	req2, _ := http.NewRequest("GET", svr.URL+"/ephemeral", nil)
-	page, err = cl.Do(t.Context(), req2)
+	page, err = cl.Do(t.Context(), req2, DoConfig{})
 	if err != nil {
 		t.Fatalf("ephemeral fetch: %v", err)
 	}
