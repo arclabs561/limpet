@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -12,9 +11,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -854,82 +851,6 @@ func (c *Client) do(
 }
 
 
-// blobKey computes a deterministic cache key from an HTTP request.
-// The key is SHA-256 of (URL + method + headers + body), placed under the
-// request hostname. bodyLimit limits how much of the request body is read
-// (0 means no limit). The request body is restored after reading.
-// ignoreHeaders and ignoreParams exclude named headers/query params from the key.
-func blobKey(req *http.Request, bodyLimit int64, ignoreHeaders, ignoreParams map[string]bool) (string, []byte, error) {
-	var buf bytes.Buffer
-	u := *req.URL
-	// Normalize: lowercase host, sort query params, strip default ports.
-	u.Host = strings.ToLower(u.Host)
-	u.Host = stripDefaultPort(u.Host, u.Scheme)
-	q := u.Query()
-	for p := range ignoreParams {
-		q.Del(p)
-	}
-	u.RawQuery = q.Encode() // Encode sorts keys alphabetically.
-	buf.WriteString(u.String())
-	buf.WriteString(".")
-	buf.WriteString(req.Method)
-	buf.WriteString(".")
-	// Sort header keys for deterministic cache keys. http.Header is a map
-	// with non-deterministic iteration order; WriteSubset would produce
-	// different hashes for identical headers.
-	keys := make([]string, 0, len(req.Header))
-	for k := range req.Header {
-		if ignoreHeaders[http.CanonicalHeaderKey(k)] {
-			continue
-		}
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		for _, v := range req.Header[k] {
-			buf.WriteString(k)
-			buf.WriteString(": ")
-			buf.WriteString(v)
-			buf.WriteString("\r\n")
-		}
-	}
-	buf.WriteString(".")
-	body, err := peekRequestBody(req, bodyLimit)
-	if err != nil {
-		return "", nil, err
-	}
-	buf.Write(body)
-	buf.WriteString(".")
-	h := sha256.Sum256(buf.Bytes())
-	henc := base64.RawURLEncoding.EncodeToString(h[:])
-	bkey := filepath.Join(strings.ToLower(u.Hostname()), henc) + ".json"
-	return bkey, body, nil
-}
-
-// stripDefaultPort removes :80 for http and :443 for https so that
-// URLs with and without the default port produce the same cache key.
-func stripDefaultPort(host, scheme string) string {
-	switch {
-	case scheme == "http" && strings.HasSuffix(host, ":80"):
-		return strings.TrimSuffix(host, ":80")
-	case scheme == "https" && strings.HasSuffix(host, ":443"):
-		return strings.TrimSuffix(host, ":443")
-	}
-	return host
-}
-
-// archiveKey returns a timestamped key for storing a version snapshot.
-// Given "hostname/hash.json" and a time, returns "hostname/hash@20060102T150405.000Z.json".
-// Millisecond precision avoids collisions for rapid sequential fetches.
-func archiveKey(bkey string, t time.Time) string {
-	base := strings.TrimSuffix(bkey, ".json")
-	return base + "@" + t.UTC().Format("20060102T150405.000Z") + ".json"
-}
-
-// archivePrefix returns the prefix for listing all archive snapshots of a key.
-func archivePrefix(bkey string) string {
-	return strings.TrimSuffix(bkey, ".json") + "@"
-}
 
 // PageVersion describes a single archived snapshot of a cached page.
 type PageVersion struct {
@@ -993,24 +914,6 @@ type PageDiff struct {
 	NewFetched time.Time
 }
 
-// peekRequestBody reads the request body (up to limit bytes) and replaces it
-// with a fresh reader so it can be sent again.
-func peekRequestBody(req *http.Request, limit int64) ([]byte, error) {
-	var body []byte
-	if req.Body != nil {
-		rdr := req.Body
-		if limit > 0 {
-			rdr = http.MaxBytesReader(nil, req.Body, limit)
-		}
-		var err error
-		body, err = io.ReadAll(rdr)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read http req body: %w", err)
-		}
-	}
-	req.Body = io.NopCloser(bytes.NewBuffer(body))
-	return body, nil
-}
 
 // DoConfig controls per-request behavior for Client.Do and Client.Get.
 type DoConfig struct {

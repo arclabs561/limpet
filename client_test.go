@@ -229,3 +229,82 @@ func TestClientRefreshPatterns(t *testing.T) {
 		t.Errorf("total hits = %d, want 2", hits.Load())
 	}
 }
+
+func TestClientCachePolicySkip(t *testing.T) {
+	bucket := setupClientBucket(t)
+	cl, err := NewClient(t.Context(), bucket)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	var hits atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		fmt.Fprint(w, "hello")
+	}))
+	t.Cleanup(svr.Close)
+
+	// First request: should fetch and cache.
+	page, err := cl.Get(t.Context(), svr.URL)
+	if err != nil {
+		t.Fatalf("first get: %v", err)
+	}
+	if string(page.Response.Body) != "hello" {
+		t.Fatalf("body = %q", page.Response.Body)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("hits = %d, want 1", hits.Load())
+	}
+
+	// Second request with CachePolicySkip: should bypass cache entirely.
+	ctx := WithCachePolicy(t.Context(), CachePolicySkip)
+	page, err = cl.Get(ctx, svr.URL)
+	if err != nil {
+		t.Fatalf("skip get: %v", err)
+	}
+	if hits.Load() != 2 {
+		t.Errorf("hits = %d, want 2 (CachePolicySkip should bypass cache)", hits.Load())
+	}
+
+	// Third request without skip: should still return cached (first fetch).
+	page, err = cl.Get(t.Context(), svr.URL)
+	if err != nil {
+		t.Fatalf("cached get: %v", err)
+	}
+	if hits.Load() != 2 {
+		t.Errorf("hits = %d, want 2 (should serve from cache)", hits.Load())
+	}
+}
+
+func TestClientCachePolicyReplace(t *testing.T) {
+	bucket := setupClientBucket(t)
+	cl, err := NewClient(t.Context(), bucket)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	var hits atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		fmt.Fprint(w, "hello")
+	}))
+	t.Cleanup(svr.Close)
+
+	// Populate cache.
+	_, err = cl.Get(t.Context(), svr.URL)
+	if err != nil {
+		t.Fatalf("first get: %v", err)
+	}
+
+	// CachePolicyReplace via context should force re-fetch (equivalent to DoConfig.Replace).
+	ctx := WithCachePolicy(t.Context(), CachePolicyReplace)
+	_, err = cl.Get(ctx, svr.URL)
+	if err != nil {
+		t.Fatalf("replace get: %v", err)
+	}
+	if hits.Load() != 2 {
+		t.Errorf("hits = %d, want 2 (CachePolicyReplace should re-fetch)", hits.Load())
+	}
+}
