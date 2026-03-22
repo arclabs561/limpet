@@ -34,19 +34,22 @@ TEST_LIVE_HTTP=true go test -tags test_all  # live HTTP tests
 ## API conventions
 
 - Construction options: `With*()` functional options (e.g., `WithBrowser()`, `WithRateLimit()`, `WithIgnoreHeaders()`)
-- Per-request options: `DoConfig{}` struct (e.g., `DoConfig{Replace: true, Archive: true}`)
-- Per-request context: `WithCachePolicy(ctx, ...)`, `WithCacheTTL(ctx, ...)`
+- Per-request options: `DoConfig{}` struct -- single value, not variadic (e.g., `cl.Do(ctx, req, DoConfig{Replace: true})`)
+- Per-request context: `WithCachePolicy(ctx, ...)`, `WithCacheTTL(ctx, ...)` -- works with both Client and Transport
 - Transport options: `TransportWith*()` (e.g., `TransportWithRateLimit()`, `TransportWithIgnoreHeaders()`)
 - Error types: `StatusError`, `ThrottledError` (no `Fetch` prefix)
-- Cache policy: `CachePolicyDefault`, `CachePolicyReplace`, `CachePolicySkip` via context
+- Cache policy: `CachePolicyDefault`, `CachePolicyReplace`, `CachePolicySkip` via context. `DoConfig.Replace` is equivalent to `CachePolicyReplace`.
+- Source constants: `SourceHTTPPlain`, `SourceHTTPStealth`, `SourceHTTPBrowser`, `SourceCache`, `SourceRemote`, `SourceFetch`, `SourceStale`, `SourceRevalidated`
 - Cache key: normalized URL (lowercase host, sorted params, stripped default ports) + method + headers + body, with exclusion options
 
 ## Key types
 
-- `Client` -- orchestrator: HTTP fetch, browser, retry, cache read/write, archive
-- `Transport` -- `http.RoundTripper` with caching, singleflight dedup, conditional requests (standalone, no retry/browser)
+- `cacheLayer` -- shared cache logic (read, write, key computation, refresh patterns, stale-if-error) embedded by both Client and Transport
+- `Client` -- orchestrator: HTTP/stealth/browser fetch, retry, archive. Embeds cacheLayer.
+- `Transport` -- `http.RoundTripper` with caching, singleflight dedup, conditional requests. Embeds cacheLayer.
 - `blob.Bucket` -- two-tier storage (badger L1 + remote file/S3), with eviction and purge
 - `Page` -- cached request/response pair with metadata
-- `DoConfig` -- per-request options (Replace, Browser, Archive, SilentThrottle, Limiter)
+- `DoConfig` -- per-request options (Replace, Browser, Stealth, Archive, SilentThrottle, Limiter)
+- `CachePolicy` -- per-request cache behavior via context (Default, Replace, Skip). Works with both Client and Transport.
 - `RetryConfig` -- retry behavior (Attempts, MinWait, MaxWait, Jitter)
-- `TransportStats` / `TransportStatsSnapshot` -- cache hit/miss/revalidation/coalesce counters
+- `TransportStatsSnapshot` -- cache hit/miss/revalidation/coalesce counters (read via `Transport.Stats()`)

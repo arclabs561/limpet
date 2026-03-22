@@ -3,11 +3,11 @@
 [![Go package docs](https://pkg.go.dev/badge/github.com/arclabs561/limpet/badge.svg)](https://pkg.go.dev/github.com/arclabs561/limpet)
 [![Build status](https://github.com/arclabs561/limpet/actions/workflows/main.yml/badge.svg?branch=main&event=push)](https://github.com/arclabs561/limpet/actions)
 
-A Go library and CLI for fetching web pages with automatic caching. Supports plain HTTP and headless browser (Playwright/Chromium) requests. Can run as a caching HTTP proxy with HTTPS CONNECT tunneling.
+A Go library and CLI for fetching web pages with automatic caching. Supports plain HTTP, stealth transport (browser TLS fingerprint for Cloudflare bypass), and headless browser (Playwright/Chromium) requests. Can run as a caching HTTP proxy with HTTPS CONNECT tunneling.
 
 ## Features
 
-- **HTTP + headless browser**: fetch pages via standard HTTP or Playwright-driven Chromium
+- **HTTP + stealth + headless browser**: fetch via standard HTTP, stealth transport (real browser TLS fingerprint), or Playwright-driven Chromium
 - **Blob storage**: cache fetched pages to local filesystem or S3
 - **Deterministic cache keys**: normalized URL+method+headers+body maps to a SHA-256 blob key, with options to exclude headers and query params
 - **Conditional requests**: automatic ETag/If-Modified-Since revalidation in Transport avoids re-downloading unchanged content
@@ -17,7 +17,9 @@ A Go library and CLI for fetching web pages with automatic caching. Supports pla
 - **Per-request cache TTL**: override the default TTL per request via context
 - **Rate limiting**: configurable per-request rate limits with exponential backoff
 - **Silent throttle detection**: detect and retry when a site silently serves captcha/block pages
-- **HTTP proxy mode**: caching HTTP proxy with HTTPS CONNECT tunneling (SSRF-safe)
+- **Stale-if-error**: optionally serve cached responses when upstream fails
+- **Refresh patterns**: URL-based cache TTL rules (like Squid's refresh_pattern)
+- **HTTP proxy mode**: caching HTTP proxy with HTTPS CONNECT tunneling (SSRF-safe, `--allow-private` for dev use)
 
 ## CLI Usage
 
@@ -34,6 +36,9 @@ limpet do -f https://example.com
 # Include response headers in output
 limpet do -i https://example.com
 
+# Use stealth transport (browser TLS fingerprint, bypasses Cloudflare)
+limpet do -S https://example.com
+
 # Use headless browser (Playwright)
 limpet do -B https://example.com
 
@@ -45,6 +50,9 @@ limpet do -X POST https://example.com/api
 
 # Run as a caching HTTP proxy
 limpet proxy -a localhost:8080
+
+# Allow proxying to private/loopback addresses (dev use)
+limpet proxy --allow-private
 
 # List cached entries
 limpet cache ls
@@ -145,15 +153,19 @@ page, _ = cl.Get(ctx, "https://example.com")
 ### Client options (construction time)
 
 - `limpet.WithBrowser()` -- always use headless browser
+- `limpet.WithStealth()` -- always use stealth transport (browser TLS fingerprint, bypasses Cloudflare)
 - `limpet.WithChromiumSandbox(false)` -- disable Chromium OS sandbox (for CI containers)
+- `limpet.WithHTTPClient(hc)` -- custom `*http.Client` (proxies, TLS settings)
 - `limpet.WithRateLimit(10)` -- set programmatic rate limit
 - `limpet.WithRequestBodyLimit(10e6)` -- max request body for cache key (default 10 MB, 0 = no limit)
 - `limpet.WithResponseBodyLimit(100e6)` -- max response body to cache (default 100 MB, 0 = no limit)
-- `limpet.WithIgnoreHeaders("User-Agent", "Accept-Encoding")` -- exclude headers from cache key (different browsers, same cache entry)
-- `limpet.WithIgnoreParams("_t", "token", "utm_source")` -- exclude query params from cache key (auth tokens, tracking params)
-- `limpet.WithUserAgent("limpet/0.1")` -- default User-Agent header (applied if not already set)
-- `limpet.WithCacheStatuses(200, 301, 404)` -- cache non-200 responses (default: 200 only)
+- `limpet.WithIgnoreHeaders("User-Agent", "Accept-Encoding")` -- exclude headers from cache key
+- `limpet.WithIgnoreParams("_t", "token", "utm_source")` -- exclude query params from cache key
+- `limpet.WithUserAgent("mybot/1.0")` -- default User-Agent header (applied if not already set)
+- `limpet.WithCacheStatuses(200, 301, 404)` -- cache non-200 responses (default: 200 only). Cached non-200 responses are returned without `StatusError`.
 - `limpet.WithRetry(limpet.RetryConfig{Attempts: 3, MinWait: 2 * time.Second})` -- configure retry (zero fields keep defaults: 5 attempts, 1s min, 1m max, 1s jitter)
+- `limpet.WithRefreshPatterns(...)` -- URL-based cache TTL rules
+- `limpet.WithStaleIfError(true)` -- return stale cache on upstream failure
 
 ### Per-request options (DoConfig)
 
@@ -161,11 +173,14 @@ page, _ = cl.Get(ctx, "https://example.com")
 page, _ := cl.Do(ctx, req, limpet.DoConfig{
     Replace:        true,                // force re-fetch, bypassing cache
     Browser:        true,                // use headless browser for this request
+    Stealth:        true,                // use stealth transport (mutually exclusive with Browser)
     Archive:        true,                // store a timestamped snapshot for version history
     SilentThrottle: regexp.MustCompile(`captcha`), // detect and retry throttled responses
     Limiter:        rateLimiter,         // per-request rate limiter
 })
 ```
+
+Client also honors `CachePolicy` from context (same as Transport), so `WithCachePolicy(ctx, CachePolicySkip)` works with both APIs. `DoConfig.Replace` is equivalent to `CachePolicyReplace`.
 
 ### Batch fetching
 
@@ -249,7 +264,7 @@ client := &http.Client{Transport: tr}
 
 // First call fetches and caches. Second call returns from cache.
 resp, _ := client.Get("https://example.com")
-// resp.Header.Get("X-Limpet-Source") == "fetch", "cache", or "revalidated"
+// resp.Header.Get("X-Limpet-Source") == "fetch", "cache", "revalidated", or "stale"
 ```
 
 Per-request cache control via context:
@@ -267,7 +282,7 @@ ctx = limpet.WithCacheTTL(ctx, 7*24*time.Hour) // weekly
 
 ### Client vs Transport
 
-Use **Transport** when you want transparent caching as a drop-in `http.RoundTripper` for any `http.Client`. Use **Client** when you also need retry with backoff, headless browser rendering, version history, or silent throttle detection. Transport is the caching primitive; Client composes it with higher-level scraping features.
+Use **Transport** when you want transparent caching as a drop-in `http.RoundTripper` for any `http.Client`. Use **Client** when you also need retry with backoff, headless browser/stealth rendering, version history, or silent throttle detection. Both share the same cache logic internally (`cacheLayer`) and honor `CachePolicy` from context.
 
 ## License
 
