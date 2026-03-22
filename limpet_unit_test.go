@@ -65,11 +65,11 @@ func TestBlobKey(t *testing.T) {
 		req2.Header.Set("Accept", "text/html")
 		req2.Header.Set("User-Agent", "limpet/test")
 
-		key1, _, err := c.blobKey(req1)
+		key1, _, err := c.cache.cacheKey(req1)
 		if err != nil {
 			t.Fatalf("blobKey: %v", err)
 		}
-		key2, _, err := c.blobKey(req2)
+		key2, _, err := c.cache.cacheKey(req2)
 		if err != nil {
 			t.Fatalf("blobKey: %v", err)
 		}
@@ -82,8 +82,8 @@ func TestBlobKey(t *testing.T) {
 		req1, _ := http.NewRequest("GET", "https://example.com/a", nil)
 		req2, _ := http.NewRequest("GET", "https://example.com/b", nil)
 
-		key1, _, _ := c.blobKey(req1)
-		key2, _, _ := c.blobKey(req2)
+		key1, _, _ := c.cache.cacheKey(req1)
+		key2, _, _ := c.cache.cacheKey(req2)
 		if key1 == key2 {
 			t.Errorf("different URLs produced same key: %q", key1)
 		}
@@ -93,8 +93,8 @@ func TestBlobKey(t *testing.T) {
 		req1, _ := http.NewRequest("GET", "https://example.com", nil)
 		req2, _ := http.NewRequest("POST", "https://example.com", nil)
 
-		key1, _, _ := c.blobKey(req1)
-		key2, _, _ := c.blobKey(req2)
+		key1, _, _ := c.cache.cacheKey(req1)
+		key2, _, _ := c.cache.cacheKey(req2)
 		if key1 == key2 {
 			t.Errorf("different methods produced same key: %q", key1)
 		}
@@ -103,7 +103,7 @@ func TestBlobKey(t *testing.T) {
 	t.Run("hostname in key path", func(t *testing.T) {
 		req, _ := http.NewRequest("GET", "https://example.com/path", nil)
 
-		key, _, _ := c.blobKey(req)
+		key, _, _ := c.cache.cacheKey(req)
 		if key == "" {
 			t.Fatal("empty key")
 		}
@@ -119,8 +119,8 @@ func TestBlobKey(t *testing.T) {
 		req1, _ := http.NewRequest("POST", "https://example.com", body1)
 		req2, _ := http.NewRequest("POST", "https://example.com", body2)
 
-		key1, _, _ := c.blobKey(req1)
-		key2, _, _ := c.blobKey(req2)
+		key1, _, _ := c.cache.cacheKey(req1)
+		key2, _, _ := c.cache.cacheKey(req2)
 		if key1 == key2 {
 			t.Errorf("different bodies produced same key: %q", key1)
 		}
@@ -130,7 +130,7 @@ func TestBlobKey(t *testing.T) {
 		body := bytes.NewBufferString("hello")
 		req, _ := http.NewRequest("POST", "https://example.com", body)
 
-		_, reqBody, err := c.blobKey(req)
+		_, reqBody, err := c.cache.cacheKey(req)
 		if err != nil {
 			t.Fatalf("blobKey: %v", err)
 		}
@@ -141,12 +141,12 @@ func TestBlobKey(t *testing.T) {
 }
 
 func TestBlobKeyIgnoreHeaders(t *testing.T) {
-	c := &Client{
+	c := &Client{cache: cacheLayer{
 		ignoreHeaders: map[string]bool{
 			"User-Agent":      true,
 			"Accept-Encoding": true,
 		},
-	}
+	}}
 
 	req1, _ := http.NewRequest("GET", "https://example.com/page", nil)
 	req1.Header.Set("User-Agent", "chrome")
@@ -156,8 +156,8 @@ func TestBlobKeyIgnoreHeaders(t *testing.T) {
 	req2.Header.Set("User-Agent", "firefox")
 	req2.Header.Set("Accept", "text/html")
 
-	key1, _, _ := c.blobKey(req1)
-	key2, _, _ := c.blobKey(req2)
+	key1, _, _ := c.cache.cacheKey(req1)
+	key2, _, _ := c.cache.cacheKey(req2)
 	if key1 != key2 {
 		t.Errorf("ignored header changed cache key: %q vs %q", key1, key2)
 	}
@@ -167,40 +167,40 @@ func TestBlobKeyIgnoreHeaders(t *testing.T) {
 	req3.Header.Set("User-Agent", "chrome")
 	req3.Header.Set("Accept", "application/json")
 
-	key3, _, _ := c.blobKey(req3)
+	key3, _, _ := c.cache.cacheKey(req3)
 	if key1 == key3 {
 		t.Errorf("non-ignored header difference produced same key")
 	}
 }
 
 func TestBlobKeyIgnoreParams(t *testing.T) {
-	c := &Client{
+	c := &Client{cache: cacheLayer{
 		ignoreParams: map[string]bool{
 			"_t":         true,
 			"utm_source": true,
 		},
-	}
+	}}
 
 	// Ignored params should not affect cache key.
 	req1, _ := http.NewRequest("GET", "https://example.com/page?q=foo&_t=123", nil)
 	req2, _ := http.NewRequest("GET", "https://example.com/page?q=foo&_t=999&utm_source=twitter", nil)
 
-	key1, _, _ := c.blobKey(req1)
-	key2, _, _ := c.blobKey(req2)
+	key1, _, _ := c.cache.cacheKey(req1)
+	key2, _, _ := c.cache.cacheKey(req2)
 	if key1 != key2 {
 		t.Errorf("ignored params changed cache key: %q vs %q", key1, key2)
 	}
 
 	// Non-ignored param should still differentiate.
 	req3, _ := http.NewRequest("GET", "https://example.com/page?q=bar&_t=123", nil)
-	key3, _, _ := c.blobKey(req3)
+	key3, _, _ := c.cache.cacheKey(req3)
 	if key1 == key3 {
 		t.Errorf("non-ignored param difference produced same key")
 	}
 
 	// No params at all should still work.
 	req4, _ := http.NewRequest("GET", "https://example.com/page?q=foo", nil)
-	key4, _, _ := c.blobKey(req4)
+	key4, _, _ := c.cache.cacheKey(req4)
 	if key1 != key4 {
 		t.Errorf("URL without ignored params should match: %q vs %q", key1, key4)
 	}
@@ -212,8 +212,8 @@ func TestBlobKeyURLNormalization(t *testing.T) {
 	t.Run("case insensitive host", func(t *testing.T) {
 		req1, _ := http.NewRequest("GET", "https://Example.COM/path", nil)
 		req2, _ := http.NewRequest("GET", "https://example.com/path", nil)
-		key1, _, _ := c.blobKey(req1)
-		key2, _, _ := c.blobKey(req2)
+		key1, _, _ := c.cache.cacheKey(req1)
+		key2, _, _ := c.cache.cacheKey(req2)
 		if key1 != key2 {
 			t.Errorf("host case changed key: %q vs %q", key1, key2)
 		}
@@ -222,8 +222,8 @@ func TestBlobKeyURLNormalization(t *testing.T) {
 	t.Run("default port stripped", func(t *testing.T) {
 		req1, _ := http.NewRequest("GET", "https://example.com:443/path", nil)
 		req2, _ := http.NewRequest("GET", "https://example.com/path", nil)
-		key1, _, _ := c.blobKey(req1)
-		key2, _, _ := c.blobKey(req2)
+		key1, _, _ := c.cache.cacheKey(req1)
+		key2, _, _ := c.cache.cacheKey(req2)
 		if key1 != key2 {
 			t.Errorf("default port changed key: %q vs %q", key1, key2)
 		}
@@ -232,8 +232,8 @@ func TestBlobKeyURLNormalization(t *testing.T) {
 	t.Run("query param order irrelevant", func(t *testing.T) {
 		req1, _ := http.NewRequest("GET", "https://example.com/path?b=2&a=1", nil)
 		req2, _ := http.NewRequest("GET", "https://example.com/path?a=1&b=2", nil)
-		key1, _, _ := c.blobKey(req1)
-		key2, _, _ := c.blobKey(req2)
+		key1, _, _ := c.cache.cacheKey(req1)
+		key2, _, _ := c.cache.cacheKey(req2)
 		if key1 != key2 {
 			t.Errorf("param order changed key: %q vs %q", key1, key2)
 		}
@@ -409,7 +409,7 @@ func TestErrPageStatusNotOK(t *testing.T) {
 	})
 
 	t.Run("404 accepted when in cacheStatuses", func(t *testing.T) {
-		cl2 := &Client{cacheStatuses: map[int]bool{200: true, 404: true}}
+		cl2 := &Client{cache: cacheLayer{cacheStatuses: map[int]bool{200: true, 404: true}}}
 		page := &Page{Response: PageResponse{StatusCode: 404}}
 		if err := cl2.errPageStatusNotOK(page); err != nil {
 			t.Errorf("expected nil for cacheable 404, got: %v", err)

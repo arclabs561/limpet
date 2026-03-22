@@ -22,18 +22,12 @@ type Transport struct {
 	// Base is the underlying RoundTripper. Nil means http.DefaultTransport.
 	Base http.RoundTripper
 
-	bucket           *blob.Bucket
-	rateLimit        ratelimit.Limiter
-	requestBodyLimit int64
-	respBodyLimit    int64
-	ignoreHeaders    map[string]bool
-	ignoreParams     map[string]bool
-	cacheStatuses    map[int]bool
-	userAgent        string
-	refreshPatterns  []RefreshPattern
-	staleIfError     bool
-	flight           singleflight.Group
-	stats            transportStats
+	cache         cacheLayer
+	rateLimit     ratelimit.Limiter
+	respBodyLimit int64
+	userAgent     string
+	flight        singleflight.Group
+	stats         transportStats
 }
 
 // transportStats tracks cache performance counters. All fields are safe for
@@ -59,7 +53,7 @@ func TransportWithRateLimit(rps int, opts ...ratelimit.Option) TransportOption {
 // TransportWithRequestBodyLimit sets the maximum request body size used for
 // cache key computation. 0 means no limit.
 func TransportWithRequestBodyLimit(n int64) TransportOption {
-	return func(t *Transport) { t.requestBodyLimit = n }
+	return func(t *Transport) { t.cache.requestBodyLimit = n }
 }
 
 // TransportWithResponseBodyLimit sets the maximum response body size to cache.
@@ -73,11 +67,11 @@ func TransportWithResponseBodyLimit(n int64) TransportOption {
 // requests but should map to the same cache entry.
 func TransportWithIgnoreHeaders(names ...string) TransportOption {
 	return func(t *Transport) {
-		if t.ignoreHeaders == nil {
-			t.ignoreHeaders = make(map[string]bool)
+		if t.cache.ignoreHeaders == nil {
+			t.cache.ignoreHeaders = make(map[string]bool)
 		}
 		for _, n := range names {
-			t.ignoreHeaders[http.CanonicalHeaderKey(n)] = true
+			t.cache.ignoreHeaders[http.CanonicalHeaderKey(n)] = true
 		}
 	}
 }
@@ -86,11 +80,11 @@ func TransportWithIgnoreHeaders(names ...string) TransportOption {
 // computation. Useful for stripping auth tokens or tracking params.
 func TransportWithIgnoreParams(names ...string) TransportOption {
 	return func(t *Transport) {
-		if t.ignoreParams == nil {
-			t.ignoreParams = make(map[string]bool)
+		if t.cache.ignoreParams == nil {
+			t.cache.ignoreParams = make(map[string]bool)
 		}
 		for _, n := range names {
-			t.ignoreParams[n] = true
+			t.cache.ignoreParams[n] = true
 		}
 	}
 }
@@ -104,9 +98,9 @@ func TransportWithUserAgent(ua string) TransportOption {
 // caching. By default only 200 is cached.
 func TransportWithCacheStatuses(codes ...int) TransportOption {
 	return func(t *Transport) {
-		t.cacheStatuses = make(map[int]bool, len(codes))
+		t.cache.cacheStatuses = make(map[int]bool, len(codes))
 		for _, code := range codes {
-			t.cacheStatuses[code] = true
+			t.cache.cacheStatuses[code] = true
 		}
 	}
 }
@@ -114,9 +108,11 @@ func TransportWithCacheStatuses(codes ...int) TransportOption {
 // NewTransport creates a caching Transport backed by the given bucket.
 func NewTransport(bucket *blob.Bucket, opts ...TransportOption) *Transport {
 	t := &Transport{
-		bucket:           bucket,
-		requestBodyLimit: 10e6,
-		respBodyLimit:    100e6,
+		cache: cacheLayer{
+			bucket:           bucket,
+			requestBodyLimit: 10e6,
+		},
+		respBodyLimit: 100e6,
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -147,20 +143,13 @@ type TransportStatsSnapshot struct {
 // TransportWithRefreshPatterns sets URL-based cache TTL rules for the transport.
 // The first matching pattern determines the TTL for cache writes.
 func TransportWithRefreshPatterns(patterns ...RefreshPattern) TransportOption {
-	return func(t *Transport) { t.refreshPatterns = patterns }
+	return func(t *Transport) { t.cache.refreshPatterns = patterns }
 }
 
 // TransportWithStaleIfError configures the transport to return a stale cached
 // response when the upstream fetch fails, rather than propagating the error.
 func TransportWithStaleIfError(enabled bool) TransportOption {
-	return func(t *Transport) { t.staleIfError = enabled }
-}
-
-func (t *Transport) isCacheable(statusCode int) bool {
-	if t.cacheStatuses == nil {
-		return statusCode == 200
-	}
-	return t.cacheStatuses[statusCode]
+	return func(t *Transport) { t.cache.staleIfError = enabled }
 }
 
 func (t *Transport) base() http.RoundTripper {
@@ -212,7 +201,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	policy := cachePolicyFromContext(req.Context())
 
-	key, _, err := blobKey(req, t.requestBodyLimit, t.ignoreHeaders, t.ignoreParams)
+	key, _, err := t.cache.cacheKey(req)
 	if err != nil {
 		return nil, fmt.Errorf("limpet: failed to compute cache key: %w", err)
 	}
@@ -221,7 +210,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// request headers (Replace policy).
 	var cachedPage *Page
 	if policy != CachePolicySkip {
-		if page, err := readCachedPage(req.Context(), t.bucket, key); err == nil {
+		if page, err := t.cache.readPage(req.Context(), key); err == nil {
 			if policy == CachePolicyDefault {
 				t.stats.hits.Add(1)
 				resp := page.HTTPResponse()
@@ -230,13 +219,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 			// Replace: keep cached page for conditional request headers.
 			cachedPage = page
-			if etag := page.Response.Header.Get("ETag"); etag != "" {
-				req = req.Clone(req.Context())
-				req.Header.Set("If-None-Match", etag)
-			} else if lm := page.Response.Header.Get("Last-Modified"); lm != "" {
-				req = req.Clone(req.Context())
-				req.Header.Set("If-Modified-Since", lm)
-			}
+			req = setConditionalHeaders(req, page)
 		} else if policy == CachePolicyDefault {
 			t.stats.misses.Add(1)
 		}
@@ -249,7 +232,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if policy == CachePolicyReplace {
 		page, err := t.fetchAndCache(req, key, policy, cachedPage)
 		if err != nil {
-			if t.staleIfError && cachedPage != nil {
+			if t.cache.staleIfError && cachedPage != nil {
 				t.stats.staleServed.Add(1)
 				resp := cachedPage.HTTPResponse()
 				resp.Header.Set("X-Limpet-Source", "stale")
@@ -273,7 +256,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	})
 	if err != nil {
 		// stale-if-error: return cached page on upstream failure.
-		if t.staleIfError && cachedPage != nil {
+		if t.cache.staleIfError && cachedPage != nil {
 			t.stats.staleServed.Add(1)
 			resp := cachedPage.HTTPResponse()
 			resp.Header.Set("X-Limpet-Source", "stale")
@@ -333,17 +316,9 @@ func (t *Transport) fetchAndCache(
 	page := pageFromRoundTrip(req, resp, body)
 	page.Meta.Source = SourceFetch
 
-	// Cache write with refresh pattern TTL.
-	if t.isCacheable(resp.StatusCode) && policy != CachePolicySkip {
-		writeCtx := req.Context()
-		if len(t.refreshPatterns) > 0 {
-			if _, hasCtxTTL := writeCtx.Value(blob.CacheTTLKey{}).(time.Duration); !hasCtxTTL {
-				if ttl, ok := matchRefreshTTL(t.refreshPatterns, req.URL.String()); ok {
-					writeCtx = blob.WithCacheTTL(writeCtx, ttl)
-				}
-			}
-		}
-		if err := writeCachedPage(writeCtx, t.bucket, key, page); err != nil {
+	// Cache write.
+	if t.cache.isCacheable(resp.StatusCode) && policy != CachePolicySkip {
+		if err := t.cache.writePage(req.Context(), key, page, req.URL.String()); err != nil {
 			return nil, fmt.Errorf("failed to write cache: %w", err)
 		}
 	}

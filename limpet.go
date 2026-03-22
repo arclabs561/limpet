@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -59,27 +58,21 @@ func parseRateLimit(raw string) (ratelimit.Limiter, error) {
 
 // Client fetches web pages with automatic caching.
 type Client struct {
-	httpClient       *http.Client
-	bucket           *blob.Bucket
-	mu               *sync.Mutex
-	pw               *playwright.Playwright
-	browser          playwright.Browser
-	alwaysDoBrowser  bool
-	alwaysDoStealth  bool
-	chromiumSandbox  bool
-	startBrowser     func() error
-	requestBodyLimit int64 // no limit when <= 0
-	respBodyLimit    int64 // no limit when <= 0
-	ignoreHeaders    map[string]bool
-	ignoreParams     map[string]bool
-	cacheStatuses    map[int]bool // nil means only 200
-	userAgent        string
-	retry            RetryConfig
-	rateLimit        ratelimit.Limiter
-	refreshPatterns  []RefreshPattern
-	staleIfError     bool
-	startedAt        time.Time
-	requests         atomic.Uint64
+	cache           cacheLayer
+	httpClient      *http.Client
+	mu              *sync.Mutex
+	pw              *playwright.Playwright
+	browser         playwright.Browser
+	alwaysDoBrowser bool
+	alwaysDoStealth bool
+	chromiumSandbox bool
+	startBrowser    func() error
+	respBodyLimit   int64 // no limit when <= 0
+	userAgent       string
+	retry           RetryConfig
+	rateLimit       ratelimit.Limiter
+	startedAt       time.Time
+	requests        atomic.Uint64
 }
 
 // Option configures a Client at construction time.
@@ -107,7 +100,7 @@ func WithChromiumSandbox(enabled bool) Option {
 // WithRequestBodyLimit sets the maximum request body size used for cache key
 // computation. 0 means no limit. Default: 10 MB.
 func WithRequestBodyLimit(n int64) Option {
-	return func(c *Client) { c.requestBodyLimit = n }
+	return func(c *Client) { c.cache.requestBodyLimit = n }
 }
 
 // WithResponseBodyLimit sets the maximum response body size to read and cache.
@@ -121,11 +114,11 @@ func WithResponseBodyLimit(n int64) Option {
 // requests but should map to the same cache entry.
 func WithIgnoreHeaders(names ...string) Option {
 	return func(c *Client) {
-		if c.ignoreHeaders == nil {
-			c.ignoreHeaders = make(map[string]bool)
+		if c.cache.ignoreHeaders == nil {
+			c.cache.ignoreHeaders = make(map[string]bool)
 		}
 		for _, n := range names {
-			c.ignoreHeaders[http.CanonicalHeaderKey(n)] = true
+			c.cache.ignoreHeaders[http.CanonicalHeaderKey(n)] = true
 		}
 	}
 }
@@ -135,11 +128,11 @@ func WithIgnoreHeaders(names ...string) Option {
 // params (utm_source, etc.) that vary between requests to the same resource.
 func WithIgnoreParams(names ...string) Option {
 	return func(c *Client) {
-		if c.ignoreParams == nil {
-			c.ignoreParams = make(map[string]bool)
+		if c.cache.ignoreParams == nil {
+			c.cache.ignoreParams = make(map[string]bool)
 		}
 		for _, n := range names {
-			c.ignoreParams[n] = true
+			c.cache.ignoreParams[n] = true
 		}
 	}
 }
@@ -148,9 +141,9 @@ func WithIgnoreParams(names ...string) Option {
 // By default only 200 is cached. Use this to also cache redirects, 404s, etc.
 func WithCacheStatuses(codes ...int) Option {
 	return func(c *Client) {
-		c.cacheStatuses = make(map[int]bool, len(codes))
+		c.cache.cacheStatuses = make(map[int]bool, len(codes))
 		for _, code := range codes {
-			c.cacheStatuses[code] = true
+			c.cache.cacheStatuses[code] = true
 		}
 	}
 }
@@ -194,14 +187,14 @@ func WithHTTPClient(hc *http.Client) Option {
 //
 // This is analogous to Squid's refresh_pattern directive.
 func WithRefreshPatterns(patterns ...RefreshPattern) Option {
-	return func(c *Client) { c.refreshPatterns = patterns }
+	return func(c *Client) { c.cache.refreshPatterns = patterns }
 }
 
 // WithStaleIfError configures the client to return a stale cached response
 // when a fresh fetch fails (network error, server error, etc.). Only applies
 // when a cached response exists (e.g. during CachePolicyReplace / force-refetch).
 func WithStaleIfError(enabled bool) Option {
-	return func(c *Client) { c.staleIfError = enabled }
+	return func(c *Client) { c.cache.staleIfError = enabled }
 }
 
 // WithRetry configures retry behavior. Zero-value fields keep defaults.
@@ -229,11 +222,13 @@ func NewClient(
 	opts ...Option,
 ) (*Client, error) {
 	c := &Client{
-		bucket:           bucket,
-		mu:               new(sync.Mutex),
-		chromiumSandbox:  true,
-		requestBodyLimit: 10e6,  // 10 MB
-		respBodyLimit:    100e6, // 100 MB
+		cache: cacheLayer{
+			bucket:           bucket,
+			requestBodyLimit: 10e6, // 10 MB
+		},
+		mu:              new(sync.Mutex),
+		chromiumSandbox: true,
+		respBodyLimit:   100e6, // 100 MB
 		retry: RetryConfig{
 			Attempts: 5,
 			MinWait:  1 * time.Second,
@@ -275,13 +270,6 @@ func NewClient(
 	return c, nil
 }
 
-func (c *Client) isCacheable(statusCode int) bool {
-	if c.cacheStatuses == nil {
-		return statusCode == 200
-	}
-	return c.cacheStatuses[statusCode]
-}
-
 // Close shuts down the browser (if started) and releases resources.
 func (c *Client) Close() {
 	c.mu.Lock()
@@ -316,7 +304,7 @@ func (e *StatusError) Error() string {
 // in the set of accepted statuses. By default only 200 is accepted. When
 // WithCacheStatuses is configured, all cacheable statuses are accepted.
 func (c *Client) errPageStatusNotOK(page *Page) error {
-	if c.isCacheable(page.Response.StatusCode) {
+	if c.cache.isCacheable(page.Response.StatusCode) {
 		return nil
 	}
 	return &StatusError{Page: page}
@@ -770,29 +758,6 @@ func (c *Client) fetchBrowser(
 	}, nil
 }
 
-// readCachedPage reads a cached page from the bucket. Returns the page and
-// its source label, or a *blob.NotFoundError if not cached.
-func readCachedPage(ctx context.Context, bucket *blob.Bucket, key string) (*Page, error) {
-	b, err := bucket.GetBlob(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	page := new(Page)
-	if err := json.Unmarshal(b.Data, page); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal cached page: %w", err)
-	}
-	page.Meta.Source = b.Source
-	return page, nil
-}
-
-// writeCachedPage writes a page to the bucket.
-func writeCachedPage(ctx context.Context, bucket *blob.Bucket, key string, page *Page) error {
-	data, err := json.Marshal(page)
-	if err != nil {
-		return fmt.Errorf("failed to marshal page: %w", err)
-	}
-	return bucket.SetBlob(ctx, key, data)
-}
 
 func (c *Client) do(
 	ctx context.Context,
@@ -808,34 +773,35 @@ func (c *Client) do(
 		req.Header.Set("User-Agent", c.userAgent)
 	}
 
-	bkey, reqBody, err := c.blobKey(req)
+	bkey, reqBody, err := c.cache.cacheKey(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create blob key: %w", err)
 	}
 
-	// Try reading cached page. On hit without Replace, return it.
-	// On hit with Replace (or for conditional request support), keep the
-	// cached page for ETag/Last-Modified headers and 304 handling.
+	// Determine effective cache policy: context CachePolicy takes precedence,
+	// DoConfig.Replace upgrades Default to Replace for backward compatibility.
+	policy := cachePolicyFromContext(ctx)
+	if cfg.Replace && policy == CachePolicyDefault {
+		policy = CachePolicyReplace
+	}
+
+	// Cache read: return on hit (Default), or keep for conditional headers (Replace).
 	var cachedPage *Page
-	if cp, err := readCachedPage(ctx, c.bucket, bkey); err == nil {
-		if !cfg.Replace {
-			if err := c.errPageStatusNotOK(cp); err != nil {
-				return nil, err
+	if policy != CachePolicySkip {
+		if cp, err := c.cache.readPage(ctx, bkey); err == nil {
+			if policy == CachePolicyDefault {
+				if err := c.errPageStatusNotOK(cp); err != nil {
+					return nil, err
+				}
+				return cp, nil
 			}
-			return cp, nil
-		}
-		cachedPage = cp
-		if etag := cp.Response.Header.Get("ETag"); etag != "" {
-			req = req.Clone(req.Context())
-			req.Header.Set("If-None-Match", etag)
-		} else if lm := cp.Response.Header.Get("Last-Modified"); lm != "" {
-			req = req.Clone(req.Context())
-			req.Header.Set("If-Modified-Since", lm)
-		}
-	} else if !cfg.Replace {
-		var notFound *blob.NotFoundError
-		if !errors.As(err, &notFound) {
-			return nil, fmt.Errorf("failed to read from blob: %w", err)
+			cachedPage = cp
+			req = setConditionalHeaders(req, cp)
+		} else if policy == CachePolicyDefault {
+			var notFound *blob.NotFoundError
+			if !errors.As(err, &notFound) {
+				return nil, fmt.Errorf("failed to read from blob: %w", err)
+			}
 		}
 	}
 
@@ -846,8 +812,7 @@ func (c *Client) do(
 	}
 	page, err = fetchFn(ctx, req, reqBody, cfg)
 	if err != nil {
-		// stale-if-error: return cached page on fetch failure.
-		if c.staleIfError && cachedPage != nil {
+		if c.cache.staleIfError && cachedPage != nil {
 			cachedPage.Meta.Source = SourceStale
 			return cachedPage, nil
 		}
@@ -860,25 +825,14 @@ func (c *Client) do(
 		return cachedPage, nil
 	}
 
-	// Only cache responses with cacheable status codes to prevent transient
-	// errors from becoming permanent cache entries.
-	if c.isCacheable(page.Response.StatusCode) {
-		// Apply refresh pattern TTL if no per-request TTL is set.
-		writeCtx := ctx
-		if len(c.refreshPatterns) > 0 {
-			if _, hasCtxTTL := ctx.Value(blob.CacheTTLKey{}).(time.Duration); !hasCtxTTL {
-				if ttl, ok := matchRefreshTTL(c.refreshPatterns, req.URL.String()); ok {
-					writeCtx = blob.WithCacheTTL(ctx, ttl)
-				}
-			}
-		}
-		if err := writeCachedPage(writeCtx, c.bucket, bkey, page); err != nil {
+	// Cache write.
+	if c.cache.isCacheable(page.Response.StatusCode) && policy != CachePolicySkip {
+		if err := c.cache.writePage(ctx, bkey, page, req.URL.String()); err != nil {
 			return nil, fmt.Errorf("failed to write page: %w", err)
 		}
-		// Write a timestamped archive snapshot for version history.
 		if cfg.Archive {
 			akey := archiveKey(bkey, page.Meta.FetchedAt)
-			if err := writeCachedPage(ctx, c.bucket, akey, page); err != nil {
+			if err := c.cache.writePage(ctx, akey, page, req.URL.String()); err != nil {
 				log.Warn().Err(err).Str("key", akey).Msg("failed to write archive snapshot")
 			}
 		}
@@ -899,9 +853,6 @@ func (c *Client) do(
 	return page, nil
 }
 
-func (c *Client) blobKey(req *http.Request) (string, []byte, error) {
-	return blobKey(req, c.requestBodyLimit, c.ignoreHeaders, c.ignoreParams)
-}
 
 // blobKey computes a deterministic cache key from an HTTP request.
 // The key is SHA-256 of (URL + method + headers + body), placed under the
@@ -989,12 +940,12 @@ type PageVersion struct {
 // Versions lists all archived snapshots for the given request, ordered by
 // fetch time (oldest first). Returns nil if no archive entries exist.
 func (c *Client) Versions(ctx context.Context, req *http.Request) ([]PageVersion, error) {
-	bkey, _, err := c.blobKey(req)
+	bkey, _, err := c.cache.cacheKey(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute blob key: %w", err)
 	}
 	prefix := archivePrefix(bkey)
-	entries, err := c.bucket.ListCache(prefix)
+	entries, err := c.cache.bucket.ListCache(prefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list archive entries: %w", err)
 	}
@@ -1017,7 +968,7 @@ func (c *Client) Versions(ctx context.Context, req *http.Request) ([]PageVersion
 
 // Version reads a specific archived page snapshot by its key.
 func (c *Client) Version(ctx context.Context, key string) (*Page, error) {
-	return readCachedPage(ctx, c.bucket, key)
+	return c.cache.readPage(ctx, key)
 }
 
 // Diff compares two pages and returns whether the response body changed.
