@@ -3,6 +3,7 @@ module github.com/arclabs561/limpet
 go 1.25.0
 
 require (
+	github.com/Noooste/azuretls-client v1.12.12
 	github.com/aws/aws-sdk-go-v2/config v1.32.11
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.4
 	github.com/dgraph-io/badger/v3 v3.2103.5
@@ -17,7 +18,6 @@ require (
 )
 
 require (
-	github.com/Noooste/azuretls-client v1.12.12 // indirect
 	github.com/Noooste/fhttp v1.0.15 // indirect
 	github.com/Noooste/go-socks4 v0.0.2 // indirect
 	github.com/Noooste/uquic-go v1.0.5 // indirect
