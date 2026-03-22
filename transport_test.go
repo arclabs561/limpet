@@ -311,6 +311,42 @@ func TestTransportSingleflight(t *testing.T) {
 	}
 }
 
+func TestTransportSingleflightReplaceBypasses(t *testing.T) {
+	tr, _ := setupTransport(t)
+
+	var hits atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(svr.Close)
+
+	client := &http.Client{Transport: tr}
+
+	// First request populates cache.
+	req, _ := http.NewRequestWithContext(t.Context(), "GET", svr.URL+"/replace-bypass", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	resp.Body.Close()
+
+	// Two Replace requests should each hit the server independently (no coalescing).
+	hits.Store(0)
+	for i := 0; i < 2; i++ {
+		ctx := WithCachePolicy(t.Context(), CachePolicyReplace)
+		req, _ := http.NewRequestWithContext(ctx, "GET", svr.URL+"/replace-bypass", nil)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("replace request %d: %v", i, err)
+		}
+		resp.Body.Close()
+	}
+	if h := hits.Load(); h != 2 {
+		t.Errorf("server hits = %d, want 2 (Replace should bypass singleflight)", h)
+	}
+}
+
 func TestTransportStats(t *testing.T) {
 	tr, _ := setupTransport(t)
 
