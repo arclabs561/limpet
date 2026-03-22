@@ -50,10 +50,11 @@ var (
 
 // Bucket provides two-tier blob storage (remote + local badger cache).
 type Bucket struct {
-	bucket   *blob.Bucket
-	cache    *badger.DB
-	cacheTTL time.Duration
-	stopGC   chan struct{} // closed to stop background GC goroutine
+	bucket    *blob.Bucket
+	cache     *badger.DB
+	cacheTTL  time.Duration
+	stopGC    chan struct{} // closed to stop background GC goroutine
+	closeOnce sync.Once
 }
 
 // NewBucket creates a Bucket backed by the given URL (file:// or s3://).
@@ -178,19 +179,21 @@ func newBucket(
 	return bucket, nil
 }
 
-// Close shuts down the local cache and remote bucket.
+// Close shuts down the local cache and remote bucket. Safe to call multiple times.
 func (bu *Bucket) Close() {
-	close(bu.stopGC)
-	if bu.cache != nil {
-		if err := bu.cache.Close(); err != nil {
-			log.Err(err).Msg("failed to close cache")
+	bu.closeOnce.Do(func() {
+		close(bu.stopGC)
+		if bu.cache != nil {
+			if err := bu.cache.Close(); err != nil {
+				log.Err(err).Msg("failed to close cache")
+			}
 		}
-	}
-	if bu.bucket != nil {
-		if err := bu.bucket.Close(); err != nil {
-			log.Err(err).Msg("failed to close bucket")
+		if bu.bucket != nil {
+			if err := bu.bucket.Close(); err != nil {
+				log.Err(err).Msg("failed to close bucket")
+			}
 		}
-	}
+	})
 }
 
 // CacheTTLKey is the context key for cache TTL overrides.
