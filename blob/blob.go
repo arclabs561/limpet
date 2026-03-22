@@ -87,9 +87,21 @@ func NewBucket(
 		var err error
 		cache, err = badger.Open(cacheOpts)
 		if err != nil {
-			return nil, err
+			// If another process holds the Badger lock, try read-only mode.
+			// If that also fails, proceed without cache (degrade gracefully).
+			cacheOpts = cacheOpts.WithReadOnly(true)
+			cache, err = badger.Open(cacheOpts)
+			if err != nil {
+				log.Ctx(ctx).Warn().Err(err).
+					Str("dir", cacheDir).
+					Msg("cannot open badger cache (locked by another process), proceeding without cache")
+				cache = nil
+			} else {
+				log.Ctx(ctx).Info().Str("dir", cacheDir).Msg("opened badger cache in read-only mode (locked by another process)")
+			}
+		} else {
+			log.Ctx(ctx).Debug().Str("dir", cacheDir).Msg("opened badger cache")
 		}
-		log.Ctx(ctx).Debug().Str("dir", cacheDir).Msg("opened badger cache")
 	}
 	bucket, err := newBucket(ctx, bucketURL)
 	if err != nil {
