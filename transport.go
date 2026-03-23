@@ -235,7 +235,15 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// request headers (Replace policy).
 	var cachedPage *Page
 	if policy != CachePolicySkip {
-		if page, err := t.cache.readPage(req.Context(), key); err == nil {
+		if page, err := t.cache.readPage(req.Context(), key); err == nil && varyMatch(page, req) {
+			// immutable: if the response is fresh and immutable, always serve
+			// from cache (even on Replace policy). RFC 8246.
+			if !page.Stale() && page.hasImmutable() {
+				t.stats.hits.Add(1)
+				resp := page.HTTPResponse()
+				resp.Header.Set("X-Limpet-Source", page.Meta.Source)
+				return resp, nil
+			}
 			if policy == CachePolicyDefault {
 				// stale-while-revalidate: serve stale and refresh in background.
 				if page.staleWhileRevalidateOK() {

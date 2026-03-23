@@ -872,6 +872,94 @@ func TestTransportStaleWhileRevalidate(t *testing.T) {
 	}
 }
 
+func TestTransportVaryHeader(t *testing.T) {
+	tr, _ := setupTransport(t)
+
+	var hits atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Vary", "Accept")
+		_, _ = w.Write([]byte("for-" + r.Header.Get("Accept")))
+	}))
+	t.Cleanup(svr.Close)
+
+	client := &http.Client{Transport: tr}
+
+	// Request with Accept: text/html
+	req1, _ := http.NewRequestWithContext(t.Context(), "GET", svr.URL+"/vary", nil)
+	req1.Header.Set("Accept", "text/html")
+	resp, _ := client.Do(req1)
+	body1, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body1) != "for-text/html" {
+		t.Errorf("body = %q", body1)
+	}
+
+	// Same URL, different Accept: should be a cache miss (Vary mismatch).
+	req2, _ := http.NewRequestWithContext(t.Context(), "GET", svr.URL+"/vary", nil)
+	req2.Header.Set("Accept", "application/json")
+	resp, _ = client.Do(req2)
+	body2, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body2) != "for-application/json" {
+		t.Errorf("body = %q", body2)
+	}
+
+	if hits.Load() != 2 {
+		t.Errorf("hits = %d, want 2 (Vary mismatch should cause cache miss)", hits.Load())
+	}
+
+	// Same Accept as first request: should be a cache hit.
+	req3, _ := http.NewRequestWithContext(t.Context(), "GET", svr.URL+"/vary", nil)
+	req3.Header.Set("Accept", "text/html")
+	resp, _ = client.Do(req3)
+	body3, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body3) != "for-text/html" {
+		t.Errorf("body = %q", body3)
+	}
+	if hits.Load() != 2 {
+		t.Errorf("hits = %d, want 2 (matching Vary should be cache hit)", hits.Load())
+	}
+}
+
+func TestTransportImmutable(t *testing.T) {
+	tr, _ := setupTransport(t)
+
+	var hits atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Cache-Control", "max-age=3600, immutable")
+		_, _ = w.Write([]byte("static-asset"))
+	}))
+	t.Cleanup(svr.Close)
+
+	client := &http.Client{Transport: tr}
+
+	// First request: populates cache.
+	resp, _ := client.Get(svr.URL + "/immutable.js")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "static-asset" {
+		t.Errorf("body = %q", body)
+	}
+
+	// Replace request: immutable + fresh should serve from cache, not re-fetch.
+	ctx := WithCachePolicy(t.Context(), CachePolicyReplace)
+	req, _ := http.NewRequestWithContext(ctx, "GET", svr.URL+"/immutable.js", nil)
+	resp, _ = client.Do(req)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "static-asset" {
+		t.Errorf("body = %q", body)
+	}
+
+	// Server should only have been hit once (immutable skips revalidation).
+	if hits.Load() != 1 {
+		t.Errorf("hits = %d, want 1 (immutable should skip re-fetch)", hits.Load())
+	}
+}
+
 func TestTransportResponseBodyLimit(t *testing.T) {
 	bucket := setupTransportBucket(t)
 	tr := NewTransport(bucket, TransportWithResponseBodyLimit(10))
