@@ -38,6 +38,9 @@ type BucketConfig struct {
 	CacheDir string
 	NoCache  bool
 	CacheTTL time.Duration // 0 means use default (24h), negative means no expiry
+	// Store overrides the default badger-based local cache with a custom
+	// KVStore implementation. When set, CacheDir is ignored.
+	Store KVStore
 }
 
 // zstd encoder/decoder pools to avoid ~1 MB allocation per call.
@@ -59,10 +62,28 @@ var (
 // ErrClosed is returned when an operation is attempted on a closed Bucket.
 var ErrClosed = errors.New("blob: bucket is closed")
 
-// Bucket provides two-tier blob storage (remote + local badger cache).
+// KVStore is an interface for the local cache backend. The default
+// implementation uses badger. Alternative implementations (Pebble, bbolt)
+// can be provided via BucketConfig.KVStore.
+type KVStore interface {
+	Get(key []byte) ([]byte, error)
+	Set(key, val []byte, ttl time.Duration) error
+	Delete(key []byte) error
+	List(prefix []byte) ([]KVEntry, error)
+	Close() error
+}
+
+// KVEntry represents a key in the KV store with optional metadata.
+type KVEntry struct {
+	Key       []byte
+	Size      int64
+	ExpiresAt uint64 // Unix timestamp, 0 = no expiry
+}
+
+// Bucket provides two-tier blob storage (remote + local KV cache).
 type Bucket struct {
 	bucket    *blob.Bucket
-	cache     *badger.DB
+	cache     KVStore
 	cacheTTL  time.Duration
 	stopGC    chan struct{} // closed to stop background GC goroutine
 	writeWG   sync.WaitGroup // tracks in-flight async remote writes
@@ -86,8 +107,10 @@ func NewBucket(
 		cacheTTL = 0 // no expiry
 	}
 
-	var cache *badger.DB
-	if !cfg.NoCache {
+	var cache KVStore
+	if cfg.Store != nil {
+		cache = cfg.Store
+	} else if !cfg.NoCache {
 		cacheDir := cfg.CacheDir
 		if cacheDir == "" {
 			base, err := os.UserCacheDir()
@@ -98,23 +121,22 @@ func NewBucket(
 		}
 		cacheOpts := badger.DefaultOptions(cacheDir).
 			WithLogger(newBadgerLogger(*log.Ctx(ctx)))
-		var err error
-		cache, err = badger.Open(cacheOpts)
+		store, err := NewBadgerStore(cacheOpts)
 		if err != nil {
 			// If another process holds the Badger lock, try read-only mode.
-			// If that also fails, proceed without cache (degrade gracefully).
 			cacheOpts = cacheOpts.WithReadOnly(true)
-			cache, err = badger.Open(cacheOpts)
+			store, err = NewBadgerStore(cacheOpts)
 			if err != nil {
 				log.Ctx(ctx).Warn().Err(err).
 					Str("dir", cacheDir).
 					Msg("cannot open badger cache (locked by another process), proceeding without cache")
-				cache = nil
 			} else {
 				log.Ctx(ctx).Info().Str("dir", cacheDir).Msg("opened badger cache in read-only mode (locked by another process)")
+				cache = store
 			}
 		} else {
 			log.Ctx(ctx).Debug().Str("dir", cacheDir).Msg("opened badger cache")
+			cache = store
 		}
 	}
 	bucket, err := newBucket(ctx, bucketURL)
@@ -133,9 +155,14 @@ func NewBucket(
 	return bu, nil
 }
 
-// runGC periodically triggers badger value log garbage collection.
-// Without this, the value log grows unbounded as entries expire or are deleted.
+// runGC periodically triggers garbage collection on the cache backend.
+// Only runs for backends that support it (e.g., BadgerStore).
 func (bu *Bucket) runGC() {
+	type gcRunner interface{ RunGC(float64) error }
+	gc, ok := bu.cache.(gcRunner)
+	if !ok {
+		return // backend doesn't need GC
+	}
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 	for {
@@ -143,8 +170,7 @@ func (bu *Bucket) runGC() {
 		case <-bu.stopGC:
 			return
 		case <-ticker.C:
-			// Run GC until it reports less than 50% space could be reclaimed.
-			for bu.cache.RunValueLogGC(0.5) == nil {
+			for gc.RunGC(0.5) == nil {
 			}
 		}
 	}
@@ -249,14 +275,7 @@ func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte) error {
 		if override, ok := ctx.Value(ctxKeyCacheTTL{}).(time.Duration); ok {
 			ttl = override
 		}
-		err := bu.cache.Update(func(txn *badger.Txn) error {
-			entry := badger.NewEntry([]byte(key), compressed).WithDiscard()
-			if ttl > 0 {
-				entry.WithTTL(ttl)
-			}
-			return txn.SetEntry(entry)
-		})
-		if err != nil {
+		if err := bu.cache.Set([]byte(key), compressed, ttl); err != nil {
 			log.Err(err).Msg("failed to set cache")
 		}
 	}
@@ -362,26 +381,17 @@ func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) 
 
 	var cacheData []byte
 	if bu.cache != nil {
-		err := bu.cache.View(func(txn *badger.Txn) error {
-			item, err := txn.Get([]byte(key))
-			if err == nil {
-				cacheData, err = item.ValueCopy(nil)
-				if err != nil {
-					return err
+		val, err := bu.cache.Get([]byte(key))
+		if err != nil {
+			var notFound *NotFoundError
+			if !errors.As(err, &notFound) {
+				if bu.bucket == nil {
+					return nil, fmt.Errorf("failed to read cache: %w", err)
 				}
-				return nil
+				log.Err(err).Msg("failed to read cache")
 			}
-			if errors.Is(err, badger.ErrKeyNotFound) {
-				return &NotFoundError{Key: key}
-			}
-			return nil
-		})
-		var notFound *NotFoundError
-		if err != nil && !errors.As(err, &notFound) {
-			if bu.bucket == nil {
-				return nil, fmt.Errorf("failed to read cache: %w", err)
-			}
-			log.Err(err).Msg("failed to read cache")
+		} else {
+			cacheData = val
 		}
 	}
 	if cacheData != nil {
@@ -410,15 +420,8 @@ func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) 
 		// Backfill local cache with compressed data.
 		if bu.cache != nil {
 			compressed := compressZstd(data)
-			cacheErr := bu.cache.Update(func(txn *badger.Txn) error {
-				entry := badger.NewEntry([]byte(key), compressed).WithDiscard()
-				if bu.cacheTTL > 0 {
-					entry.WithTTL(bu.cacheTTL)
-				}
-				return txn.SetEntry(entry)
-			})
-			if cacheErr != nil {
-				log.Err(cacheErr).Msg("failed to set cache")
+			if err := bu.cache.Set([]byte(key), compressed, bu.cacheTTL); err != nil {
+				log.Err(err).Msg("failed to backfill cache")
 			}
 		}
 		return &Blob{
@@ -446,31 +449,20 @@ func (bu *Bucket) ListCache(prefix string) ([]CacheEntry, error) {
 	if bu.cache == nil {
 		return nil, nil
 	}
-	var entries []CacheEntry
-	err := bu.cache.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
-		defer it.Close()
-
-		pfx := []byte(prefix)
-		for it.Seek(pfx); it.Valid(); it.Next() {
-			item := it.Item()
-			key := string(item.Key())
-			if prefix != "" && !strings.HasPrefix(key, prefix) {
-				break
-			}
-			// Strip .zst suffix so callers can pass keys to GetBlob without double-suffixing.
-			cleanKey := strings.TrimSuffix(key, ".zst")
-			entries = append(entries, CacheEntry{
-				Key:       cleanKey,
-				Size:      item.ValueSize(),
-				ExpiresAt: item.ExpiresAt(),
-			})
-		}
-		return nil
-	})
-	return entries, err
+	kvEntries, err := bu.cache.List([]byte(prefix))
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]CacheEntry, 0, len(kvEntries))
+	for _, kv := range kvEntries {
+		cleanKey := strings.TrimSuffix(string(kv.Key), ".zst")
+		entries = append(entries, CacheEntry{
+			Key:       cleanKey,
+			Size:      kv.Size,
+			ExpiresAt: kv.ExpiresAt,
+		})
+	}
+	return entries, nil
 }
 
 // DeleteBlob removes a key from both the remote bucket and local cache.
@@ -489,10 +481,7 @@ func (bu *Bucket) DeleteBlob(ctx context.Context, key string) error {
 		}
 	}
 	if bu.cache != nil {
-		err := bu.cache.Update(func(txn *badger.Txn) error {
-			return txn.Delete([]byte(key))
-		})
-		if err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
+		if err := bu.cache.Delete([]byte(key)); err != nil {
 			return fmt.Errorf("failed to delete from cache: %w", err)
 		}
 	}
@@ -509,37 +498,16 @@ func (bu *Bucket) PurgeCache(prefix string) (int, error) {
 	if bu.cache == nil {
 		return 0, nil
 	}
-	var keys [][]byte
-	err := bu.cache.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		pfx := []byte(prefix)
-		for it.Seek(pfx); it.Valid(); it.Next() {
-			key := it.Item().KeyCopy(nil)
-			if prefix != "" && !strings.HasPrefix(string(key), prefix) {
-				break
-			}
-			keys = append(keys, key)
-		}
-		return nil
-	})
+	kvEntries, err := bu.cache.List([]byte(prefix))
 	if err != nil {
 		return 0, fmt.Errorf("failed to list cache keys: %w", err)
 	}
-	// Use WriteBatch for efficient bulk deletion.
-	wb := bu.cache.NewWriteBatch()
-	for _, k := range keys {
-		if err := wb.Delete(k); err != nil {
-			wb.Cancel()
-			return 0, fmt.Errorf("failed to batch delete key: %w", err)
+	for _, kv := range kvEntries {
+		if err := bu.cache.Delete(kv.Key); err != nil {
+			return 0, fmt.Errorf("failed to delete key: %w", err)
 		}
 	}
-	if err := wb.Flush(); err != nil {
-		return 0, fmt.Errorf("failed to flush batch delete: %w", err)
-	}
-	return len(keys), nil
+	return len(kvEntries), nil
 }
 
 var _ badger.Logger = (*badgerLogger)(nil)
