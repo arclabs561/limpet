@@ -15,10 +15,13 @@ A Go library and CLI for fetching web pages with automatic caching. Supports pla
 - **Version history**: archive timestamped snapshots and diff pages to detect changes
 - **Staleness hints**: check HTTP cache headers or time-based age via `Page.Stale()` / `Page.StaleAfter()`
 - **Per-request cache TTL**: override the default TTL per request via context
-- **Rate limiting**: configurable per-request rate limits with exponential backoff
+- **Rate limiting**: global and per-host rate limits with exponential backoff
+- **Adaptive rate limiting**: automatic back-off on 429/503 responses, gradual restoration on success
 - **Silent throttle detection**: detect and retry when a site silently serves captcha/block pages
 - **Stale-if-error**: optionally serve cached responses when upstream fails
+- **Stale-while-revalidate**: serve stale responses immediately while refreshing in the background (RFC 5861)
 - **Refresh patterns**: URL-based cache TTL rules (like Squid's refresh_pattern)
+- **Pluggable cache backend**: default badger KV store, replaceable via `KVStore` interface
 - **HTTP proxy mode**: caching HTTP proxy with HTTPS CONNECT tunneling (SSRF-safe, `--allow-private` for dev use)
 
 ## CLI Usage
@@ -183,8 +186,9 @@ page, _ = cl.Get(ctx, "https://example.com")
 - `limpet.WithStealth()` -- always use stealth transport (browser TLS fingerprint, bypasses Cloudflare)
 - `limpet.WithChromiumSandbox(false)` -- disable Chromium OS sandbox (for CI containers)
 - `limpet.WithHTTPClient(hc)` -- custom `*http.Client` (proxies, TLS settings)
-- `limpet.WithRateLimit(10)` -- set global rate limit
+- `limpet.WithRateLimit(10)` -- set global rate limit (requests/second)
 - `limpet.WithPerHostRateLimit(2)` -- per-hostname rate limit (applied in addition to global)
+- `limpet.WithAdaptiveRate(true)` -- auto back-off on 429/503, restore on success (requires per-host rate limit)
 - `limpet.WithRequestBodyLimit(10e6)` -- max request body for cache key (default 10 MB, 0 = no limit)
 - `limpet.WithResponseBodyLimit(100e6)` -- max response body to cache (default 100 MB, 0 = no limit)
 - `limpet.WithIgnoreHeaders("User-Agent", "Accept-Encoding")` -- exclude headers from cache key
@@ -203,7 +207,7 @@ page, _ := cl.Do(ctx, req, limpet.DoConfig{
     Stealth:        true,                // use stealth transport (mutually exclusive with Browser)
     Archive:        true,                // store a timestamped snapshot for version history
     SilentThrottle: regexp.MustCompile(`captcha`), // detect and retry throttled responses
-    Limiter:        rateLimiter,         // per-request rate limiter
+    Limiter:        rate.NewLimiter(rate.Limit(2), 1), // per-request rate limiter
 })
 ```
 
@@ -335,9 +339,25 @@ ctx = limpet.WithCachePolicy(ctx, limpet.CachePolicySkip)
 ctx = limpet.WithCacheTTL(ctx, 7*24*time.Hour) // weekly
 ```
 
+Transport also supports `stale-while-revalidate` (RFC 5861): when a cached response has `Cache-Control: stale-while-revalidate=N` and is stale but within the revalidation window, Transport serves the stale response immediately and refreshes in the background.
+
 ### Client vs Transport
 
-Use **Transport** when you want transparent caching as a drop-in `http.RoundTripper` for any `http.Client`. Use **Client** when you also need retry with backoff, headless browser/stealth rendering, version history, or silent throttle detection. Both share the same cache logic internally (`cacheLayer`) and honor `CachePolicy` from context.
+Use **Transport** when you want transparent caching as a drop-in `http.RoundTripper` for any `http.Client`. It handles singleflight dedup, conditional requests, stale-while-revalidate, and per-host rate limiting.
+
+Use **Client** when you also need retry with backoff, headless browser/stealth rendering, version history, adaptive rate limiting, or silent throttle detection.
+
+Both share the same cache logic internally (`cacheLayer`) and honor `CachePolicy` from context.
+
+### Custom cache backends
+
+The local cache defaults to badger (embedded KV store). You can provide a custom backend implementing `blob.KVStore`:
+
+```go
+bucket, _ := blob.NewBucket(ctx, "file:///tmp/remote", &blob.BucketConfig{
+    Store: myCustomKVStore, // implements blob.KVStore (Get/Set/Delete/List/Close)
+})
+```
 
 ## License
 

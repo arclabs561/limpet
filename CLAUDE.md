@@ -19,12 +19,14 @@ TEST_LIVE_HTTP=true go test -tags test_all  # live HTTP tests
 - Prefer `t.Context()` over `context.Background()` and `t.TempDir()` over `os.MkdirTemp()` in tests (Go 1.24+). Reduces boilerplate and ensures cleanup.
 - When upgrading golangci-lint or adding linters, check for deprecation warnings and replace with suggested alternatives.
 - Shared `*Page` (from singleflight or cache) must use `Header.Clone()` when constructing `*http.Response` -- concurrent callers will write to the header map.
+- TTL-based tests: use 5s+ TTL values to avoid flakiness under race detector.
 
 ## Accepted trade-offs
 
 - `TestDoBrowser` fails without playwright binaries. Passes in CI.
-- badger v3 (maintenance mode) -- upgrade to v4 when motivated.
+- badger v3 (maintenance mode) -- abstracted behind `KVStore` interface; upgrade or swap when motivated.
 - gocloud.dev pulls ~15 transitive deps for S3 support. Accepted for now.
+- Async remote writes: `SetBlob` writes to local cache synchronously, remote bucket asynchronously. `Close()` and `DeleteBlob` wait for in-flight writes. Trade-off: caller gets success before remote write completes.
 
 ## Commit style
 
@@ -32,23 +34,34 @@ TEST_LIVE_HTTP=true go test -tags test_all  # live HTTP tests
 
 ## API conventions
 
-- Construction options: `With*()` functional options (e.g., `WithBrowser()`, `WithRateLimit()`, `WithIgnoreHeaders()`)
-- Per-request options: `DoConfig{}` struct (e.g., `cl.Do(ctx, req, DoConfig{Replace: true})`). `Do()` takes a single `DoConfig`; `Get()` accepts variadic for convenience.
+- Construction options: `With*()` functional options (e.g., `WithBrowser()`, `WithRateLimit()`, `WithPerHostRateLimit()`, `WithAdaptiveRate()`)
+- Per-request options: `DoConfig{}` struct. `DoConfig.Replace` is deprecated; use `WithCachePolicy(ctx, CachePolicyReplace)`.
 - Per-request context: `WithCachePolicy(ctx, ...)`, `WithCacheTTL(ctx, ...)` -- works with both Client and Transport
-- Transport options: `TransportWith*()` (e.g., `TransportWithRateLimit()`, `TransportWithIgnoreHeaders()`)
-- Error types: `StatusError`, `ThrottledError` (no `Fetch` prefix)
-- Cache policy: `CachePolicyDefault`, `CachePolicyReplace`, `CachePolicySkip` via context. `DoConfig.Replace` is deprecated; use `WithCachePolicy(ctx, CachePolicyReplace)`.
-- Source constants: `SourceHTTPPlain`, `SourceHTTPStealth`, `SourceHTTPBrowser`, `SourceStale`, `SourceRevalidated` (limpet package). `SourceCache`, `SourceRemote` are in `blob` package.
-- Cache key: normalized URL (lowercase host, sorted params, stripped default ports) + method + headers + body, with exclusion options
+- Per-request rate limiter: `DoConfig.Limiter` accepts `*rate.Limiter` from `golang.org/x/time/rate`
+- Transport options: `TransportWith*()` (e.g., `TransportWithRateLimit()`, `TransportWithPerHostRateLimit()`)
+- Error types: `StatusError` (with `StatusCode()` method), `ThrottledError` (with `URL` field)
+- Error helpers: `IsStatus(err, 404, 500)` for status checks without `errors.As` boilerplate
+- Cache policy: `CachePolicyDefault`, `CachePolicyReplace`, `CachePolicySkip` via context
+- Source constants: `SourceHTTPPlain`, `SourceHTTPStealth`, `SourceHTTPBrowser`, `SourceStale`, `SourceRevalidated` (limpet package). `SourceCache`, `SourceRemote` in `blob` package.
+- Cache key: normalized URL (lowercase host, sorted params via `path.Join`, stripped default ports) + method + headers + body
 
 ## Key types
 
-- `cacheLayer` -- shared cache logic (read, write, key computation, refresh patterns, stale-if-error), a named field in both Client and Transport
-- `Client` -- orchestrator: HTTP/stealth/browser fetch, retry, archive. Embeds cacheLayer.
-- `Transport` -- `http.RoundTripper` with caching, singleflight dedup, conditional requests. Embeds cacheLayer.
-- `blob.Bucket` -- two-tier storage (badger L1 + remote file/S3), with eviction and purge
+- `cacheLayer` -- shared cache logic (read, write, key computation, refresh patterns, stale-if-error), embedded in both Client and Transport
+- `Client` -- orchestrator: HTTP/stealth/browser fetch, retry, archive, adaptive rate limiting. Embeds cacheLayer.
+- `Transport` -- `http.RoundTripper` with caching, singleflight dedup, conditional requests, stale-while-revalidate. Embeds cacheLayer.
+- `blob.Bucket` -- two-tier storage (KVStore local + remote file/S3), async remote writes
+- `blob.KVStore` -- interface for local cache backend (Get/Set/Delete/List/Close). Default: `BadgerStore`.
 - `Page` -- cached request/response pair with metadata
-- `DoConfig` -- per-request options (Browser, Stealth, Archive, SilentThrottle, Limiter). `Replace` is deprecated.
-- `CachePolicy` -- per-request cache behavior via context (Default, Replace, Skip). Works with both Client and Transport.
+- `DoConfig` -- per-request options (Browser, Stealth, Archive, SilentThrottle, Limiter)
+- `CachePolicy` -- per-request cache behavior via context (Default, Replace, Skip)
 - `RetryConfig` -- retry behavior (Attempts, MinWait, MaxWait, Jitter)
 - `TransportStatsSnapshot` -- cache hit/miss/revalidation/coalesce counters (read via `Transport.Stats()`)
+
+## CLI flags (do command)
+
+- `-f` force refetch, `-i` include headers, `-I` HEAD request
+- `-X METHOD` custom method, `-B` browser, `-S` stealth
+- `-H "Key: Value"` custom header (repeatable), `-d "body"` POST data
+- `-o file` write response to file, `-j N` concurrency for multi-URL
+- `--timeout 30s` request deadline
