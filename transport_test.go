@@ -825,8 +825,9 @@ func TestTransportResponseBodyLimit(t *testing.T) {
 	t.Cleanup(svr.Close)
 
 	client := &http.Client{Transport: tr}
-	_, err := client.Get(svr.URL + "/big")
+	resp, err := client.Get(svr.URL + "/big")
 	if err == nil {
+		resp.Body.Close()
 		t.Error("expected error when response exceeds body limit")
 	}
 }
@@ -842,8 +843,9 @@ func TestTransport304WithoutCachedPage(t *testing.T) {
 	t.Cleanup(svr.Close)
 
 	client := &http.Client{Transport: tr}
-	_, err := client.Get(svr.URL + "/bad304")
+	resp, err := client.Get(svr.URL + "/bad304")
 	if err == nil {
+		resp.Body.Close()
 		t.Error("expected error when server returns 304 without prior cached page")
 	}
 }
