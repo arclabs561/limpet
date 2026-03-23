@@ -930,7 +930,8 @@ type Limiter interface {
 
 // takeWithContext calls lim.Take() in a goroutine so that ctx cancellation
 // can abort the wait. Returns ctx.Err() if the context is cancelled before
-// Take() returns.
+// Take() returns. On cancellation, the goroutine remains alive until the
+// rate limiter releases the token (bounded by 1/rate duration).
 func takeWithContext(ctx context.Context, lim Limiter) error {
 	done := make(chan struct{})
 	go func() {

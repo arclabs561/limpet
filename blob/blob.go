@@ -425,6 +425,9 @@ type CacheEntry struct {
 // ListCache iterates all keys in the local badger cache.
 // Returns nil if cache is disabled.
 func (bu *Bucket) ListCache(prefix string) ([]CacheEntry, error) {
+	if bu.closed.Load() {
+		return nil, ErrClosed
+	}
 	if bu.cache == nil {
 		return nil, nil
 	}
@@ -482,6 +485,9 @@ func (bu *Bucket) DeleteBlob(ctx context.Context, key string) error {
 // PurgeCache deletes all entries in the local cache matching the given prefix.
 // An empty prefix deletes everything. Returns the number of entries deleted.
 func (bu *Bucket) PurgeCache(prefix string) (int, error) {
+	if bu.closed.Load() {
+		return 0, ErrClosed
+	}
 	if bu.cache == nil {
 		return 0, nil
 	}
