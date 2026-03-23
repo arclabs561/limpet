@@ -3,7 +3,6 @@ package limpet
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -268,6 +267,8 @@ func NewClient(
 }
 
 // Close shuts down the browser (if started) and releases resources.
+// Close does NOT close the underlying blob.Bucket -- the caller owns its
+// lifecycle and must close it separately.
 func (c *Client) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -758,7 +759,6 @@ func (c *Client) fetchBrowser(
 	}, nil
 }
 
-
 func (c *Client) do(
 	ctx context.Context,
 	req *http.Request,
@@ -853,8 +853,6 @@ func (c *Client) do(
 	return page, nil
 }
 
-
-
 // PageVersion describes a single archived snapshot of a cached page.
 type PageVersion struct {
 	Key       string    // Cache key for this snapshot.
@@ -895,31 +893,9 @@ func (c *Client) Version(ctx context.Context, key string) (*Page, error) {
 	return c.cache.readPage(ctx, key)
 }
 
-// Diff compares two pages and returns whether the response body changed.
-func Diff(a, b *Page) PageDiff {
-	aHash := sha256.Sum256(a.Response.Body)
-	bHash := sha256.Sum256(b.Response.Body)
-	return PageDiff{
-		Changed:    aHash != bHash,
-		OldSize:    len(a.Response.Body),
-		NewSize:    len(b.Response.Body),
-		OldFetched: a.Meta.FetchedAt,
-		NewFetched: b.Meta.FetchedAt,
-	}
-}
-
-// PageDiff describes the difference between two page snapshots.
-type PageDiff struct {
-	Changed    bool
-	OldSize    int
-	NewSize    int
-	OldFetched time.Time
-	NewFetched time.Time
-}
-
-
 // DoConfig controls per-request behavior for Client.Do and Client.Get.
 type DoConfig struct {
+	// Deprecated: Use WithCachePolicy(ctx, CachePolicyReplace) instead.
 	// Replace skips cache read, forcing a fresh fetch (still caches the result).
 	Replace bool
 	// Browser uses headless Chromium instead of plain HTTP.
@@ -955,9 +931,6 @@ const (
 	SourceHTTPPlain   = "http.plain"
 	SourceHTTPStealth = "http.stealth"
 	SourceHTTPBrowser = "http.browser"
-	SourceCache       = "cache"
-	SourceRemote      = "remote"
-	SourceFetch       = "fetch"
 	SourceStale       = "stale"
 	SourceRevalidated = "revalidated"
 )

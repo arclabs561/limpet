@@ -260,29 +260,6 @@ func TestArchiveKey(t *testing.T) {
 	})
 }
 
-func TestDiff(t *testing.T) {
-	t.Run("identical pages", func(t *testing.T) {
-		a := &Page{Response: PageResponse{Body: []byte("hello")}}
-		b := &Page{Response: PageResponse{Body: []byte("hello")}}
-		d := Diff(a, b)
-		if d.Changed {
-			t.Error("expected Changed=false for identical bodies")
-		}
-	})
-
-	t.Run("different pages", func(t *testing.T) {
-		a := &Page{Response: PageResponse{Body: []byte("hello")}}
-		b := &Page{Response: PageResponse{Body: []byte("world")}}
-		d := Diff(a, b)
-		if !d.Changed {
-			t.Error("expected Changed=true for different bodies")
-		}
-		if d.OldSize != 5 || d.NewSize != 5 {
-			t.Errorf("sizes = %d/%d, want 5/5", d.OldSize, d.NewSize)
-		}
-	})
-}
-
 func TestPageStale(t *testing.T) {
 	t.Run("no headers means fresh", func(t *testing.T) {
 		p := &Page{

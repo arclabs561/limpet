@@ -292,12 +292,17 @@ func (t *Transport) fetchAndCache(
 		return nil, err
 	}
 
-	// 304 Not Modified: return the cached response.
-	if resp.StatusCode == 304 && cachedPage != nil {
+	// 304 Not Modified: return the cached response if available.
+	// If cachedPage is nil (e.g. singleflight path with no prior cache entry),
+	// discard the 304 -- caching an empty body would be incorrect.
+	if resp.StatusCode == 304 {
 		_ = resp.Body.Close()
-		cachedPage.Meta.Source = SourceRevalidated
-		t.stats.revalidated.Add(1)
-		return cachedPage, nil
+		if cachedPage != nil {
+			cachedPage.Meta.Source = SourceRevalidated
+			t.stats.revalidated.Add(1)
+			return cachedPage, nil
+		}
+		return nil, fmt.Errorf("limpet: received 304 without cached page to revalidate")
 	}
 
 	// Buffer the response body for caching.
@@ -315,7 +320,7 @@ func (t *Transport) fetchAndCache(
 	}
 
 	page := pageFromRoundTrip(req, resp, body)
-	page.Meta.Source = SourceFetch
+	page.Meta.Source = "fetch"
 
 	// Cache write.
 	if t.cache.isCacheable(resp.StatusCode) && policy != CachePolicySkip {

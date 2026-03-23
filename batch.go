@@ -6,7 +6,9 @@ import (
 )
 
 // GetMany fetches multiple URLs concurrently with the given concurrency limit.
-// The callback fn is called for each completed fetch (in arbitrary order).
+// The callback fn is called for each completed fetch (in arbitrary order) and
+// may be called from multiple goroutines concurrently -- callers must ensure
+// fn is safe for concurrent use.
 // Stops early if ctx is cancelled. Returns the first non-nil error from fn,
 // or nil if all callbacks return nil.
 func (c *Client) GetMany(
