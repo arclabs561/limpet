@@ -65,6 +65,7 @@ type Bucket struct {
 	cache     *badger.DB
 	cacheTTL  time.Duration
 	stopGC    chan struct{} // closed to stop background GC goroutine
+	writeWG   sync.WaitGroup // tracks in-flight async remote writes
 	closeOnce sync.Once
 	closed    atomic.Bool
 }
@@ -191,6 +192,7 @@ func newBucket(
 // Close shuts down the local cache and remote bucket. Safe to call multiple times.
 func (bu *Bucket) Close() {
 	bu.closed.Store(true)
+	bu.writeWG.Wait() // flush in-flight async remote writes
 	bu.closeOnce.Do(func() {
 		close(bu.stopGC)
 		if bu.cache != nil {
@@ -241,24 +243,7 @@ func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte) error {
 	key = storageKey(key)
 	compressed := compressZstd(data)
 
-	if bu.bucket != nil {
-		w, err := bu.bucket.NewWriter(ctx, key, nil)
-		if err != nil {
-			return fmt.Errorf("failed to create bucket writer: %w", err)
-		}
-		n, err := w.Write(compressed)
-		if err != nil {
-			_ = w.Close()
-			return err
-		}
-		if n < len(compressed) {
-			_ = w.Close()
-			return fmt.Errorf("violation of io.Writer interface: %d < %d", n, len(compressed))
-		}
-		if err := w.Close(); err != nil {
-			return fmt.Errorf("failed to close bucket writer: %w", err)
-		}
-	}
+	// Write to local cache first (fast path).
 	if bu.cache != nil {
 		ttl := bu.cacheTTL
 		if override, ok := ctx.Value(ctxKeyCacheTTL{}).(time.Duration); ok {
@@ -273,6 +258,36 @@ func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte) error {
 		})
 		if err != nil {
 			log.Err(err).Msg("failed to set cache")
+		}
+	}
+
+	// Write to remote bucket. When a local cache exists, the remote write
+	// runs asynchronously (local cache is the hot tier). Without a local
+	// cache, the remote write is synchronous (it's the only store).
+	if bu.bucket != nil {
+		writeRemote := func() {
+			w, err := bu.bucket.NewWriter(context.Background(), key, nil)
+			if err != nil {
+				log.Err(err).Str("key", key).Msg("remote write: failed to create writer")
+				return
+			}
+			if _, err := w.Write(compressed); err != nil {
+				_ = w.Close()
+				log.Err(err).Str("key", key).Msg("remote write: write failed")
+				return
+			}
+			if err := w.Close(); err != nil {
+				log.Err(err).Str("key", key).Msg("remote write: close failed")
+			}
+		}
+		if bu.cache != nil {
+			bu.writeWG.Add(1)
+			go func() {
+				defer bu.writeWG.Done()
+				writeRemote()
+			}()
+		} else {
+			writeRemote()
 		}
 	}
 	return nil

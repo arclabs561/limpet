@@ -307,6 +307,26 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("bad fetch status: %d", e.Page.Response.StatusCode)
 }
 
+// StatusCode returns the HTTP status code from the response.
+func (e *StatusError) StatusCode() int {
+	return e.Page.Response.StatusCode
+}
+
+// IsStatus reports whether err is a StatusError with one of the given codes.
+// Convenience wrapper for the common errors.As + status check pattern.
+func IsStatus(err error, codes ...int) bool {
+	var se *StatusError
+	if !errors.As(err, &se) {
+		return false
+	}
+	for _, c := range codes {
+		if se.Page.Response.StatusCode == c {
+			return true
+		}
+	}
+	return false
+}
+
 // errPageStatusNotOK returns a StatusError if the page's status code is not
 // in the set of accepted statuses. By default only 200 is accepted. When
 // WithCacheStatuses is configured, all cacheable statuses are accepted.

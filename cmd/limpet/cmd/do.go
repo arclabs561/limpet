@@ -75,6 +75,23 @@ func init() {
 		4,
 		"max concurrent fetches (when multiple URLs given)",
 	)
+	doCmd.Flags().StringArrayP(
+		"header",
+		"H",
+		nil,
+		"custom header (repeatable, format: 'Key: Value')",
+	)
+	doCmd.Flags().StringP(
+		"data",
+		"d",
+		"",
+		"request body (sets method to POST if -X not given)",
+	)
+	doCmd.Flags().Duration(
+		"timeout",
+		0,
+		"request timeout (e.g. 30s, 5m; 0 = no timeout)",
+	)
 }
 
 func doRunE(cmd *cobra.Command, args []string) error {
@@ -95,8 +112,21 @@ func doRunE(cmd *cobra.Command, args []string) error {
 	concurrency := mustFlagInt(cmd, "concurrency")
 	includeHeaders := mustFlagBool(cmd, "include")
 
+	customHeaders, _ := cmd.Flags().GetStringArray("header")
+	postData := mustFlagString(cmd, "data")
+	timeout, _ := cmd.Flags().GetDuration("timeout")
+
 	if head {
 		method = "HEAD"
+	}
+	if postData != "" && method == "GET" {
+		method = "POST"
+	}
+
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
 
 	cfg := limpet.DoConfig{
@@ -109,7 +139,7 @@ func doRunE(cmd *cobra.Command, args []string) error {
 
 	// Single URL: fetch and output directly.
 	if len(args) == 1 {
-		return doFetchOne(ctx, cl, method, args[0], cfg, includeHeaders, head, outputFile)
+		return doFetchOne(ctx, cl, method, args[0], cfg, includeHeaders, head, outputFile, customHeaders, postData)
 	}
 
 	if outputFile != "" {
@@ -139,10 +169,23 @@ func doFetchOne(
 	cfg limpet.DoConfig,
 	includeHeaders, head bool,
 	outputFile string,
+	customHeaders []string,
+	postData string,
 ) error {
-	req, err := http.NewRequest(method, url, nil)
+	var reqBody *strings.Reader
+	if postData != "" {
+		reqBody = strings.NewReader(postData)
+	}
+	req, err := http.NewRequest(method, url, reqBody)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
+	}
+	for _, h := range customHeaders {
+		k, v, ok := strings.Cut(h, ":")
+		if !ok {
+			return fmt.Errorf("invalid header format %q (expected 'Key: Value')", h)
+		}
+		req.Header.Set(strings.TrimSpace(k), strings.TrimSpace(v))
 	}
 	log.Info().Str("url", url).Msg("fetching")
 	page, err := cl.Do(ctx, req, cfg)

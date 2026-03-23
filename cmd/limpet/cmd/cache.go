@@ -94,14 +94,18 @@ func cacheLsRunE(cmd *cobra.Command, args []string) error {
 		}
 
 		// Read the page URL and status from the blob unless --keys-only.
+		// Uses a lightweight struct that skips body base64 decoding.
 		url := ""
 		status := 0
 		if !keysOnly {
 			if b, err := bucket.GetBlob(ctx, e.Key); err == nil {
-				var page limpet.Page
-				if err := json.Unmarshal(b.Data, &page); err == nil {
-					url = page.Request.URL
-					status = page.Response.StatusCode
+				var summary struct {
+					Request  struct{ URL string `json:"url"` }       `json:"request"`
+					Response struct{ StatusCode int `json:"status_code"` } `json:"response"`
+				}
+				if err := json.Unmarshal(b.Data, &summary); err == nil {
+					url = summary.Request.URL
+					status = summary.Response.StatusCode
 				}
 			}
 		}
