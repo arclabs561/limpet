@@ -64,10 +64,12 @@ func init() {
 
 func doRunE(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	cl, err := newClient(cmd)
+	cl, bucket, err := newClient(cmd)
 	if err != nil {
 		return fmt.Errorf("failed to create client: %w", err)
 	}
+	defer cl.Close()
+	defer bucket.Close()
 	method := mustFlagString(cmd, "method")
 	browser := mustFlagBool(cmd, "browser")
 	stealth := mustFlagBool(cmd, "stealth")

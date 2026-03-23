@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -141,7 +141,7 @@ func blobKey(req *http.Request, bodyLimit int64, ignoreHeaders, ignoreParams map
 	buf.WriteString(".")
 	h := sha256.Sum256(buf.Bytes())
 	henc := base64.RawURLEncoding.EncodeToString(h[:])
-	bkey := filepath.Join(strings.ToLower(u.Hostname()), henc) + ".json"
+	bkey := path.Join(strings.ToLower(u.Hostname()), henc) + ".json"
 	return bkey, body, nil
 }
 

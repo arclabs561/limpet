@@ -12,9 +12,9 @@ import (
 	"github.com/arclabs561/limpet"
 	"github.com/arclabs561/limpet/blob"
 	"github.com/rs/zerolog"
-	"golang.org/x/term"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var rootCmd = &cobra.Command{
@@ -77,58 +77,38 @@ func init() {
 	rootCmd.AddCommand(cacheCmd)
 }
 
-type loggerOptions struct {
-	Level  zerolog.Level
-	Format string
-	Color  string
-}
-
-func setupLogger(cmd *cobra.Command, args []string) context.Context {
+func setupLogger(cmd *cobra.Command, _ []string) context.Context {
 	logLevel, err := zerolog.ParseLevel(mustFlagString(cmd, "log-level"))
 	if err != nil {
 		log.Fatal().Err(err).Send()
 	}
+	zerolog.SetGlobalLevel(logLevel)
+
 	logFormat := mustFlagString(cmd, "log-format")
 	logColor := mustFlagString(cmd, "log-color")
-	ctx := cmd.Context()
-	opts := loggerOptions{
-		Level:  logLevel,
-		Format: logFormat,
-		Color:  logColor,
-	}
-	return initGlobalLogger(ctx, opts)
-}
 
-func initGlobalLogger(ctx context.Context, opts loggerOptions) context.Context {
-	zerolog.SetGlobalLevel(opts.Level)
-	ctx, lg := initLogger(ctx, opts)
-	log.Logger = lg
-	return ctx
-}
-
-func initLogger(ctx context.Context, opts loggerOptions) (context.Context, zerolog.Logger) {
 	lg := zerolog.New(os.Stderr).With().
 		Timestamp().
 		Stack().
 		Caller().
 		Logger()
-	lg.Level(opts.Level)
+	lg.Level(logLevel)
 
 	doConsole := false
 	out := os.Stderr
 	isTerm := term.IsTerminal(int(out.Fd()))
-	switch strings.TrimSpace(strings.ToLower(opts.Format)) {
+	switch strings.TrimSpace(strings.ToLower(logFormat)) {
 	case "", "auto":
 		doConsole = isTerm
 	case "console":
 		doConsole = true
 	default:
-		lg.Fatal().Msgf("unknown log format: %q", opts.Format)
+		lg.Fatal().Msgf("unknown log format: %q", logFormat)
 	}
 
 	if doConsole {
 		doColor := false
-		switch strings.ToLower(opts.Color) {
+		switch strings.ToLower(logColor) {
 		case "", "auto":
 			doColor = isTerm
 		case "always":
@@ -142,7 +122,8 @@ func initLogger(ctx context.Context, opts loggerOptions) (context.Context, zerol
 		}))
 	}
 
-	return lg.WithContext(ctx), lg
+	log.Logger = lg
+	return lg.WithContext(cmd.Context())
 }
 
 func newBucket(cmd *cobra.Command) (*blob.Bucket, error) {
@@ -170,17 +151,20 @@ func newBucket(cmd *cobra.Command) (*blob.Bucket, error) {
 	})
 }
 
-func newClient(cmd *cobra.Command) (*limpet.Client, error) {
+// newClient creates a Client and its backing Bucket. The caller must close
+// both: cl.Close() for browser resources, bucket.Close() for the cache.
+func newClient(cmd *cobra.Command) (*limpet.Client, *blob.Bucket, error) {
 	bucket, err := newBucket(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create bucket: %w", err)
+		return nil, nil, fmt.Errorf("failed to create bucket: %w", err)
 	}
 	ctx := cmd.Context()
 	cl, err := limpet.NewClient(ctx, bucket)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create client: %w", err)
+		bucket.Close()
+		return nil, nil, fmt.Errorf("failed to create client: %w", err)
 	}
-	return cl, nil
+	return cl, bucket, nil
 }
 
 const appName = "limpet"

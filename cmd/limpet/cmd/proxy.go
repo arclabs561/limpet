@@ -39,10 +39,12 @@ func init() {
 
 func proxyRunE(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	cl, err := newClient(cmd)
+	cl, bucket, err := newClient(cmd)
 	if err != nil {
 		return fmt.Errorf("failed to create client: %w", err)
 	}
+	defer cl.Close()
+	defer bucket.Close()
 	addr := mustFlagString(cmd, "addr")
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {

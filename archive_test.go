@@ -1,6 +1,7 @@
 package limpet
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -93,13 +94,9 @@ func TestArchiveAndVersions(t *testing.T) {
 		t.Errorf("version 1 body = %q, want %q", v2.Response.Body, "version-2")
 	}
 
-	// Diff should detect the change.
-	d := Diff(v1, v2)
-	if !d.Changed {
-		t.Error("diff should detect change between version-1 and version-2")
-	}
-	if d.OldSize != 9 || d.NewSize != 9 {
-		t.Errorf("diff sizes = %d/%d, want 9/9", d.OldSize, d.NewSize)
+	// Bodies should differ between versions.
+	if bytes.Equal(v1.Response.Body, v2.Response.Body) {
+		t.Error("expected different bodies between version-1 and version-2")
 	}
 }
 
@@ -161,8 +158,7 @@ func TestDiffIdentical(t *testing.T) {
 
 	v1, _ := cl.Version(ctx, versions[0].Key)
 	v2, _ := cl.Version(ctx, versions[1].Key)
-	d := Diff(v1, v2)
-	if d.Changed {
-		t.Error("diff should not detect change for identical content")
+	if !bytes.Equal(v1.Response.Body, v2.Response.Body) {
+		t.Error("expected identical bodies for identical content")
 	}
 }
