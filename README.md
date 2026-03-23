@@ -177,7 +177,6 @@ page, _ = cl.Get(ctx, "https://example.com")
 
 ```go
 page, _ := cl.Do(ctx, req, limpet.DoConfig{
-    Replace:        true,                // force re-fetch, bypassing cache
     Browser:        true,                // use headless browser for this request
     Stealth:        true,                // use stealth transport (mutually exclusive with Browser)
     Archive:        true,                // store a timestamped snapshot for version history
@@ -186,7 +185,13 @@ page, _ := cl.Do(ctx, req, limpet.DoConfig{
 })
 ```
 
-Client also honors `CachePolicy` from context (same as Transport), so `WithCachePolicy(ctx, CachePolicySkip)` works with both APIs. `DoConfig.Replace` is equivalent to `CachePolicyReplace`.
+Client honors `CachePolicy` from context (same as Transport):
+
+```go
+// Force re-fetch, bypassing cache read (still caches result)
+ctx := limpet.WithCachePolicy(ctx, limpet.CachePolicyReplace)
+page, _ := cl.Do(ctx, req, limpet.DoConfig{})
+```
 
 ### Batch fetching
 
@@ -222,7 +227,8 @@ if errors.As(err, &throttleErr) {
 
 ```go
 // Fetch with archive to build version history
-page, _ := cl.Do(ctx, req, limpet.DoConfig{Archive: true, Replace: true})
+rctx := limpet.WithCachePolicy(ctx, limpet.CachePolicyReplace)
+page, _ := cl.Do(rctx, req, limpet.DoConfig{Archive: true})
 
 // List all archived snapshots for a request
 versions, _ := cl.Versions(ctx, req)
@@ -230,11 +236,9 @@ for _, v := range versions {
     fmt.Printf("%s  %s\n", v.FetchedAt, v.Key)
 }
 
-// Read a specific version and compare
+// Read a specific version
 old, _ := cl.Version(ctx, versions[0].Key)
-new, _ := cl.Version(ctx, versions[len(versions)-1].Key)
-diff := limpet.Diff(old, new)
-fmt.Printf("changed=%v old_size=%d new_size=%d\n", diff.Changed, diff.OldSize, diff.NewSize)
+fmt.Printf("fetched=%s size=%d\n", old.Meta.FetchedAt, len(old.Response.Body))
 ```
 
 ### Staleness
@@ -242,12 +246,14 @@ fmt.Printf("changed=%v old_size=%d new_size=%d\n", diff.Changed, diff.OldSize, d
 ```go
 // Check HTTP cache headers (Cache-Control, Expires)
 if page.Stale() {
-    page, _ = cl.Get(ctx, url, limpet.DoConfig{Replace: true})
+    rctx := limpet.WithCachePolicy(ctx, limpet.CachePolicyReplace)
+    page, _ = cl.Get(rctx, url)
 }
 
 // Check time-based age (for targets with no cache headers)
 if page.StaleAfter(24 * time.Hour) {
-    page, _ = cl.Get(ctx, url, limpet.DoConfig{Replace: true})
+    rctx := limpet.WithCachePolicy(ctx, limpet.CachePolicyReplace)
+    page, _ = cl.Get(rctx, url)
 }
 ```
 
@@ -275,7 +281,7 @@ client := &http.Client{Transport: tr}
 
 // First call fetches and caches. Second call returns from cache.
 resp, _ := client.Get("https://example.com")
-// resp.Header.Get("X-Limpet-Source") == "fetch", "cache", "revalidated", or "stale"
+// resp.Header.Get("X-Limpet-Source") == "fetch", "cache", "remote", "revalidated", or "stale"
 ```
 
 Cache performance counters:
