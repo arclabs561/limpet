@@ -814,6 +814,64 @@ func TestTransportIgnoreParams(t *testing.T) {
 	}
 }
 
+func TestTransportStaleWhileRevalidate(t *testing.T) {
+	tr, _ := setupTransport(t)
+
+	var hits atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := hits.Add(1)
+		// max-age=0 makes it immediately stale, swr=60 allows serving stale for 60s.
+		w.Header().Set("Cache-Control", "max-age=0, stale-while-revalidate=60")
+		fmt.Fprintf(w, "response-%d", n)
+	}))
+	t.Cleanup(svr.Close)
+
+	client := &http.Client{Transport: tr}
+
+	// First request: populates cache.
+	resp, err := client.Get(svr.URL + "/swr")
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "response-1" {
+		t.Errorf("first body = %q, want response-1", body)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("hits = %d, want 1", hits.Load())
+	}
+
+	// Second request: page is stale (max-age=0) but within swr window (60s).
+	// Should get the stale response immediately, with background refresh.
+	resp, err = client.Get(svr.URL + "/swr")
+	if err != nil {
+		t.Fatalf("swr: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "response-1" {
+		t.Errorf("swr body = %q, want response-1 (stale)", body)
+	}
+	if src := resp.Header.Get("X-Limpet-Source"); src != "stale" {
+		t.Errorf("source = %q, want stale", src)
+	}
+
+	// Wait for background refresh to complete.
+	time.Sleep(200 * time.Millisecond)
+
+	// Third request: should get the refreshed response from cache.
+	resp, err = client.Get(svr.URL + "/swr")
+	if err != nil {
+		t.Fatalf("refreshed: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "response-2" {
+		t.Errorf("refreshed body = %q, want response-2", body)
+	}
+}
+
 func TestTransportResponseBodyLimit(t *testing.T) {
 	bucket := setupTransportBucket(t)
 	tr := NewTransport(bucket, TransportWithResponseBodyLimit(10))

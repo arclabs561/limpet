@@ -237,6 +237,17 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if policy != CachePolicySkip {
 		if page, err := t.cache.readPage(req.Context(), key); err == nil {
 			if policy == CachePolicyDefault {
+				// stale-while-revalidate: serve stale and refresh in background.
+				if page.staleWhileRevalidateOK() {
+					t.stats.hits.Add(1)
+					go func() {
+						refreshReq := req.Clone(context.Background())
+						_, _ = t.fetchAndCache(refreshReq, key, CachePolicyReplace, page)
+					}()
+					resp := page.HTTPResponse()
+					resp.Header.Set("X-Limpet-Source", "stale")
+					return resp, nil
+				}
 				t.stats.hits.Add(1)
 				resp := page.HTTPResponse()
 				resp.Header.Set("X-Limpet-Source", page.Meta.Source)
