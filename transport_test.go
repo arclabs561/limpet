@@ -744,6 +744,110 @@ func TestTransportSingleflightForgetOnError(t *testing.T) {
 	}
 }
 
+func TestTransportIgnoreHeaders(t *testing.T) {
+	bucket := setupTransportBucket(t)
+	tr := NewTransport(bucket, TransportWithIgnoreHeaders("X-Request-Id"))
+
+	var hits atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(svr.Close)
+
+	client := &http.Client{Transport: tr}
+
+	// First request with X-Request-Id: "aaa"
+	req1, _ := http.NewRequestWithContext(t.Context(), "GET", svr.URL+"/ignore-hdr", nil)
+	req1.Header.Set("X-Request-Id", "aaa")
+	resp, _ := client.Do(req1)
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Second request with X-Request-Id: "bbb" -- different header but ignored,
+	// so it should be a cache hit.
+	req2, _ := http.NewRequestWithContext(t.Context(), "GET", svr.URL+"/ignore-hdr", nil)
+	req2.Header.Set("X-Request-Id", "bbb")
+	resp, _ = client.Do(req2)
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if hits.Load() != 1 {
+		t.Errorf("server hits = %d, want 1 (ignored header should not affect cache key)", hits.Load())
+	}
+}
+
+func TestTransportIgnoreParams(t *testing.T) {
+	bucket := setupTransportBucket(t)
+	tr := NewTransport(bucket, TransportWithIgnoreParams("_t", "utm_source"))
+
+	var hits atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(svr.Close)
+
+	client := &http.Client{Transport: tr}
+
+	// Request with timestamp param.
+	resp, _ := client.Get(svr.URL + "/page?_t=111&utm_source=twitter")
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Same path, different ignored params -- should be cache hit.
+	resp, _ = client.Get(svr.URL + "/page?_t=222&utm_source=facebook")
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if hits.Load() != 1 {
+		t.Errorf("server hits = %d, want 1 (ignored params should not affect cache key)", hits.Load())
+	}
+
+	// Different non-ignored param -- should be cache miss.
+	resp, _ = client.Get(svr.URL + "/page?_t=333&q=different")
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if hits.Load() != 2 {
+		t.Errorf("server hits = %d, want 2 (different non-ignored param = different key)", hits.Load())
+	}
+}
+
+func TestTransportResponseBodyLimit(t *testing.T) {
+	bucket := setupTransportBucket(t)
+	tr := NewTransport(bucket, TransportWithResponseBodyLimit(10))
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Write more than the 10-byte limit.
+		_, _ = w.Write(make([]byte, 100))
+	}))
+	t.Cleanup(svr.Close)
+
+	client := &http.Client{Transport: tr}
+	_, err := client.Get(svr.URL + "/big")
+	if err == nil {
+		t.Error("expected error when response exceeds body limit")
+	}
+}
+
+func TestTransport304WithoutCachedPage(t *testing.T) {
+	bucket := setupTransportBucket(t)
+	tr := NewTransport(bucket)
+
+	// Server always returns 304 (misbehaving -- no conditional request was sent).
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(304)
+	}))
+	t.Cleanup(svr.Close)
+
+	client := &http.Client{Transport: tr}
+	_, err := client.Get(svr.URL + "/bad304")
+	if err == nil {
+		t.Error("expected error when server returns 304 without prior cached page")
+	}
+}
+
 func BenchmarkBlobKey(b *testing.B) {
 	req, _ := http.NewRequest("GET", "https://example.com/page?a=1&b=2&c=3", nil)
 	req.Header.Set("User-Agent", "bench/1.0")
