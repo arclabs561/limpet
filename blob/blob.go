@@ -213,6 +213,11 @@ func WithCacheTTL(ctx context.Context, ttl time.Duration) context.Context {
 	return context.WithValue(ctx, ctxKeyCacheTTL{}, ttl)
 }
 
+// storageKey appends the .zst suffix to a logical key, producing the
+// actual key used in both badger and the remote bucket. All blob operations
+// must use this to ensure consistent key mapping.
+func storageKey(key string) string { return key + ".zst" }
+
 // compressZstd compresses data using a pooled zstd encoder.
 func compressZstd(data []byte) []byte {
 	zw := zstdEncoderPool.Get().(*zstd.Encoder)
@@ -224,7 +229,7 @@ func compressZstd(data []byte) []byte {
 // Data is zstd-compressed in both tiers. If the context carries a TTL from
 // WithCacheTTL, it overrides the bucket default.
 func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte) error {
-	key += ".zst"
+	key = storageKey(key)
 	compressed := compressZstd(data)
 
 	if bu.bucket != nil {
@@ -326,7 +331,7 @@ func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) 
 			Str("key", key).
 			Msg("bucket read")
 	}()
-	key = key + ".zst"
+	key = storageKey(key)
 
 	var cacheData []byte
 	if bu.cache != nil {
@@ -440,7 +445,7 @@ func (bu *Bucket) ListCache(prefix string) ([]CacheEntry, error) {
 
 // DeleteBlob removes a key from both the remote bucket and local cache.
 func (bu *Bucket) DeleteBlob(ctx context.Context, key string) error {
-	key += ".zst"
+	key = storageKey(key)
 	if bu.bucket != nil {
 		if err := bu.bucket.Delete(ctx, key); err != nil {
 			if gcerrors.Code(err) != gcerrors.NotFound {

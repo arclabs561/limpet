@@ -25,7 +25,6 @@ TEST_LIVE_HTTP=true go test -tags test_all  # live HTTP tests
 - `TestDoBrowser` fails without playwright binaries. Passes in CI.
 - badger v3 (maintenance mode) -- upgrade to v4 when motivated.
 - gocloud.dev pulls ~15 transitive deps for S3 support. Accepted for now.
-- `filepath.Join` in blob keys -- OS-dependent separator. Fine for single-OS use.
 
 ## Commit style
 
@@ -38,8 +37,8 @@ TEST_LIVE_HTTP=true go test -tags test_all  # live HTTP tests
 - Per-request context: `WithCachePolicy(ctx, ...)`, `WithCacheTTL(ctx, ...)` -- works with both Client and Transport
 - Transport options: `TransportWith*()` (e.g., `TransportWithRateLimit()`, `TransportWithIgnoreHeaders()`)
 - Error types: `StatusError`, `ThrottledError` (no `Fetch` prefix)
-- Cache policy: `CachePolicyDefault`, `CachePolicyReplace`, `CachePolicySkip` via context. `DoConfig.Replace` is equivalent to `CachePolicyReplace`.
-- Source constants: `SourceHTTPPlain`, `SourceHTTPStealth`, `SourceHTTPBrowser`, `SourceCache`, `SourceRemote`, `SourceFetch`, `SourceStale`, `SourceRevalidated`
+- Cache policy: `CachePolicyDefault`, `CachePolicyReplace`, `CachePolicySkip` via context. `DoConfig.Replace` is deprecated; use `WithCachePolicy(ctx, CachePolicyReplace)`.
+- Source constants: `SourceHTTPPlain`, `SourceHTTPStealth`, `SourceHTTPBrowser`, `SourceStale`, `SourceRevalidated` (limpet package). `SourceCache`, `SourceRemote` are in `blob` package.
 - Cache key: normalized URL (lowercase host, sorted params, stripped default ports) + method + headers + body, with exclusion options
 
 ## Key types
@@ -49,7 +48,7 @@ TEST_LIVE_HTTP=true go test -tags test_all  # live HTTP tests
 - `Transport` -- `http.RoundTripper` with caching, singleflight dedup, conditional requests. Embeds cacheLayer.
 - `blob.Bucket` -- two-tier storage (badger L1 + remote file/S3), with eviction and purge
 - `Page` -- cached request/response pair with metadata
-- `DoConfig` -- per-request options (Replace, Browser, Stealth, Archive, SilentThrottle, Limiter)
+- `DoConfig` -- per-request options (Browser, Stealth, Archive, SilentThrottle, Limiter). `Replace` is deprecated.
 - `CachePolicy` -- per-request cache behavior via context (Default, Replace, Skip). Works with both Client and Transport.
 - `RetryConfig` -- retry behavior (Attempts, MinWait, MaxWait, Jitter)
 - `TransportStatsSnapshot` -- cache hit/miss/revalidation/coalesce counters (read via `Transport.Stats()`)
