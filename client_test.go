@@ -1,6 +1,7 @@
 package limpet
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/arclabs561/limpet/blob"
+	"go.uber.org/ratelimit"
 )
 
 func setupClientBucket(t *testing.T) *blob.Bucket {
@@ -307,6 +309,281 @@ func TestClientCachePolicyReplace(t *testing.T) {
 	}
 	if hits.Load() != 2 {
 		t.Errorf("hits = %d, want 2 (CachePolicyReplace should re-fetch)", hits.Load())
+	}
+}
+
+func TestClientWithIgnoreHeaders(t *testing.T) {
+	bucket := setupClientBucket(t)
+	cl, err := NewClient(t.Context(), bucket, WithIgnoreHeaders("X-Trace-Id"))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	var hits atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(svr.Close)
+
+	// Two requests with different ignored headers should share cache.
+	req1, _ := http.NewRequest("GET", svr.URL+"/hdr", nil)
+	req1.Header.Set("X-Trace-Id", "aaa")
+	if _, err := cl.Do(t.Context(), req1, DoConfig{}); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+
+	req2, _ := http.NewRequest("GET", svr.URL+"/hdr", nil)
+	req2.Header.Set("X-Trace-Id", "bbb")
+	if _, err := cl.Do(t.Context(), req2, DoConfig{}); err != nil {
+		t.Fatalf("second: %v", err)
+	}
+
+	if hits.Load() != 1 {
+		t.Errorf("hits = %d, want 1 (ignored header should not affect cache key)", hits.Load())
+	}
+}
+
+func TestClientWithIgnoreParams(t *testing.T) {
+	bucket := setupClientBucket(t)
+	cl, err := NewClient(t.Context(), bucket, WithIgnoreParams("_t"))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	var hits atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(svr.Close)
+
+	if _, err := cl.Get(t.Context(), svr.URL+"/page?_t=111"); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if _, err := cl.Get(t.Context(), svr.URL+"/page?_t=222"); err != nil {
+		t.Fatalf("second: %v", err)
+	}
+
+	if hits.Load() != 1 {
+		t.Errorf("hits = %d, want 1 (ignored param should not affect cache key)", hits.Load())
+	}
+}
+
+func TestClientWithCacheStatuses(t *testing.T) {
+	bucket := setupClientBucket(t)
+	cl, err := NewClient(t.Context(), bucket, WithCacheStatuses(200, 404))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	var hits atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(404)
+		_, _ = w.Write([]byte("not found"))
+	}))
+	t.Cleanup(svr.Close)
+
+	// 404 is cacheable, so first fetch should cache it and return without error.
+	page, err := cl.Get(t.Context(), svr.URL+"/missing")
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if page.Response.StatusCode != 404 {
+		t.Errorf("status = %d, want 404", page.Response.StatusCode)
+	}
+
+	// Second fetch should hit cache.
+	page, err = cl.Get(t.Context(), svr.URL+"/missing")
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("hits = %d, want 1 (404 should be cached)", hits.Load())
+	}
+	if string(page.Response.Body) != "not found" {
+		t.Errorf("body = %q", page.Response.Body)
+	}
+}
+
+func TestClientWithUserAgent(t *testing.T) {
+	bucket := setupClientBucket(t)
+	cl, err := NewClient(t.Context(), bucket, WithUserAgent("limpet-test/1.0"))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	var gotUA string
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(svr.Close)
+
+	req, _ := http.NewRequest("GET", svr.URL+"/ua", nil)
+	if _, err := cl.Do(t.Context(), req, DoConfig{Replace: true}); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if gotUA != "limpet-test/1.0" {
+		t.Errorf("User-Agent = %q, want limpet-test/1.0", gotUA)
+	}
+
+	// Caller-set UA should not be overridden.
+	req2, _ := http.NewRequest("GET", svr.URL+"/ua2", nil)
+	req2.Header.Set("User-Agent", "custom/2.0")
+	if _, err := cl.Do(t.Context(), req2, DoConfig{Replace: true}); err != nil {
+		t.Fatalf("Do custom: %v", err)
+	}
+	if gotUA != "custom/2.0" {
+		t.Errorf("caller UA overridden: got %q, want custom/2.0", gotUA)
+	}
+}
+
+func TestClientStatusError(t *testing.T) {
+	bucket := setupClientBucket(t)
+	cl, err := NewClient(t.Context(), bucket)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+		_, _ = w.Write([]byte("server error"))
+	}))
+	t.Cleanup(svr.Close)
+
+	_, err = cl.Get(t.Context(), svr.URL+"/fail")
+	if err == nil {
+		t.Fatal("expected StatusError for 500")
+	}
+	var se *StatusError
+	if !errors.As(err, &se) {
+		t.Fatalf("expected StatusError, got %T: %v", err, err)
+	}
+	if se.Page.Response.StatusCode != 500 {
+		t.Errorf("StatusError status = %d, want 500", se.Page.Response.StatusCode)
+	}
+	if se.Error() != "bad fetch status: 500" {
+		t.Errorf("Error() = %q", se.Error())
+	}
+	if string(se.Page.Response.Body) != "server error" {
+		t.Errorf("body = %q", se.Page.Response.Body)
+	}
+}
+
+func TestClientGetMany(t *testing.T) {
+	bucket := setupClientBucket(t)
+	cl, err := NewClient(t.Context(), bucket)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("page:" + r.URL.Path))
+	}))
+	t.Cleanup(svr.Close)
+
+	urls := []string{
+		svr.URL + "/a",
+		svr.URL + "/b",
+		svr.URL + "/c",
+	}
+
+	var count atomic.Int32
+	err = cl.GetMany(t.Context(), urls, 2, DoConfig{}, func(url string, page *Page, fetchErr error) error {
+		if fetchErr != nil {
+			return fetchErr
+		}
+		count.Add(1)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("GetMany: %v", err)
+	}
+	if count.Load() != 3 {
+		t.Errorf("callback count = %d, want 3", count.Load())
+	}
+}
+
+func TestClientGetManyEarlyStop(t *testing.T) {
+	bucket := setupClientBucket(t)
+	cl, err := NewClient(t.Context(), bucket)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(svr.Close)
+
+	urls := make([]string, 20)
+	for i := range urls {
+		urls[i] = fmt.Sprintf("%s/%d", svr.URL, i)
+	}
+
+	var count atomic.Int32
+	stopErr := fmt.Errorf("stop after 2")
+	err = cl.GetMany(t.Context(), urls, 1, DoConfig{}, func(url string, page *Page, fetchErr error) error {
+		if count.Add(1) >= 2 {
+			return stopErr
+		}
+		return nil
+	})
+	if !errors.Is(err, stopErr) {
+		t.Errorf("GetMany error = %v, want stopErr", err)
+	}
+}
+
+func TestClientRateLimitRespectsContext(t *testing.T) {
+	bucket := setupClientBucket(t)
+	// Very slow rate limiter: 1 request per 10 seconds.
+	cl, err := NewClient(t.Context(), bucket,
+		WithRateLimit(1, ratelimit.Per(10*time.Second)),
+		WithRetry(RetryConfig{Attempts: 1}),
+	)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(svr.Close)
+
+	// First request consumes the token.
+	req, _ := http.NewRequest("GET", svr.URL+"/first", nil)
+	if _, err := cl.Do(t.Context(), req, DoConfig{Replace: true}); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+
+	// Second request with a short-lived context should be cancelled
+	// while waiting for the rate limiter, not block for 10 seconds.
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	req2, _ := http.NewRequest("GET", svr.URL+"/second", nil)
+	start := time.Now()
+	_, err = cl.Do(ctx, req2, DoConfig{Replace: true})
+	dur := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected context deadline error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, want context.DeadlineExceeded", err)
+	}
+	if dur > 2*time.Second {
+		t.Errorf("took %v, expected < 2s (should abort on context cancel, not wait for rate limit)", dur)
 	}
 }
 

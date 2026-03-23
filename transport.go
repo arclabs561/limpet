@@ -284,7 +284,9 @@ func (t *Transport) fetchAndCache(
 	cachedPage *Page,
 ) (*Page, error) {
 	if t.rateLimit != nil {
-		t.rateLimit.Take()
+		if err := takeWithContext(req.Context(), t.rateLimit); err != nil {
+			return nil, err
+		}
 	}
 
 	resp, err := t.base().RoundTrip(req)
