@@ -112,18 +112,22 @@ func doRunE(cmd *cobra.Command, args []string) error {
 		return doFetchOne(ctx, cl, method, args[0], cfg, includeHeaders, head, outputFile)
 	}
 
+	if outputFile != "" {
+		return fmt.Errorf("-o/--output cannot be used with multiple URLs")
+	}
+
 	// Multiple URLs: concurrent fetch via GetMany.
 	return cl.GetMany(ctx, args, concurrency, cfg, func(url string, page *limpet.Page, fetchErr error) error {
 		if fetchErr != nil {
 			var notOK *limpet.StatusError
 			if errors.As(fetchErr, &notOK) {
-				log.Warn().Str("url", url).Int("status", notOK.Page.Response.StatusCode).Msg("non-200")
-				return nil // continue fetching other URLs
+				fmt.Fprintf(os.Stderr, "%d %s\n", notOK.Page.Response.StatusCode, url)
+				return nil
 			}
-			log.Error().Err(fetchErr).Str("url", url).Msg("fetch failed")
-			return nil // continue on error
+			fmt.Fprintf(os.Stderr, "ERR %s: %v\n", url, fetchErr)
+			return nil
 		}
-		log.Info().Str("url", url).Int("status", page.Response.StatusCode).Int("bytes", len(page.Response.Body)).Msg("fetched")
+		fmt.Fprintf(os.Stderr, "%d %s (%d bytes)\n", page.Response.StatusCode, url, len(page.Response.Body))
 		return nil
 	})
 }
