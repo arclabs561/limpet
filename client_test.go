@@ -587,6 +587,46 @@ func TestClientRateLimitRespectsContext(t *testing.T) {
 	}
 }
 
+func TestClientPerHostRateLimit(t *testing.T) {
+	bucket := setupClientBucket(t)
+	cl, err := NewClient(t.Context(), bucket,
+		WithPerHostRateLimit(100), // fast enough to not slow the test
+		WithRateLimit(100),
+	)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	var hits atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(svr.Close)
+
+	// Fetch two different paths on the same host.
+	for _, path := range []string{"/a", "/b", "/c"} {
+		ctx := WithCachePolicy(t.Context(), CachePolicyReplace)
+		page, err := cl.Get(ctx, svr.URL+path)
+		if err != nil {
+			t.Fatalf("Get %s: %v", path, err)
+		}
+		if string(page.Response.Body) != "ok" {
+			t.Errorf("body = %q", page.Response.Body)
+		}
+	}
+	if hits.Load() != 3 {
+		t.Errorf("hits = %d, want 3", hits.Load())
+	}
+
+	// Verify the host limiter was created.
+	_, loaded := cl.hostLimiters.Load("127.0.0.1")
+	if !loaded {
+		t.Error("expected host limiter to be created for 127.0.0.1")
+	}
+}
+
 func TestClientSilentThrottle(t *testing.T) {
 	bucket := setupClientBucket(t)
 	cl, err := NewClient(t.Context(), bucket,

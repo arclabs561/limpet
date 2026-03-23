@@ -121,6 +121,10 @@ func NewTransport(bucket *blob.Bucket, opts ...TransportOption) *Transport {
 	return t
 }
 
+// Close is a no-op provided for API symmetry with Client.Close().
+// The Transport does not own the bucket -- the caller must close it separately.
+func (t *Transport) Close() {}
+
 // Stats returns a snapshot of the transport's cache performance counters.
 func (t *Transport) Stats() TransportStatsSnapshot {
 	return TransportStatsSnapshot{

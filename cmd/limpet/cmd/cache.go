@@ -46,6 +46,7 @@ var cachePurgeCmd = &cobra.Command{
 
 func init() {
 	cacheLsCmd.Flags().BoolP("json", "j", false, "output as JSON")
+	cacheLsCmd.Flags().BoolP("keys-only", "k", false, "show cache keys only (skip reading page metadata)")
 	cacheGetCmd.Flags().BoolP("headers", "i", false, "include response headers")
 	cacheGetCmd.Flags().Bool("meta", false, "print page metadata instead of body")
 
@@ -56,6 +57,7 @@ func init() {
 }
 
 func cacheLsRunE(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
 	bucket, err := newBucket(cmd)
 	if err != nil {
 		return err
@@ -76,15 +78,8 @@ func cacheLsRunE(cmd *cobra.Command, args []string) error {
 	}
 
 	asJSON := mustFlagBool(cmd, "json")
-	if asJSON {
-		enc := json.NewEncoder(cmd.OutOrStdout())
-		for _, e := range entries {
-			if err := enc.Encode(e); err != nil {
-				return fmt.Errorf("failed to encode entry: %w", err)
-			}
-		}
-		return nil
-	}
+	keysOnly := mustFlagBool(cmd, "keys-only")
+	enc := json.NewEncoder(cmd.OutOrStdout())
 
 	for _, e := range entries {
 		expiry := "never"
@@ -97,7 +92,36 @@ func cacheLsRunE(cmd *cobra.Command, args []string) error {
 				expiry = "expired"
 			}
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s\tsize=%d\tttl=%s\n", e.Key, e.Size, expiry)
+
+		// Read the page URL and status from the blob unless --keys-only.
+		url := ""
+		status := 0
+		if !keysOnly {
+			if b, err := bucket.GetBlob(ctx, e.Key); err == nil {
+				var page limpet.Page
+				if err := json.Unmarshal(b.Data, &page); err == nil {
+					url = page.Request.URL
+					status = page.Response.StatusCode
+				}
+			}
+		}
+
+		if asJSON {
+			row := map[string]any{
+				"key":  e.Key,
+				"size": e.Size,
+				"ttl":  expiry,
+			}
+			if url != "" {
+				row["url"] = url
+				row["status"] = status
+			}
+			_ = enc.Encode(row)
+		} else if url != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s\t%d\t%s\tttl=%s\n", e.Key, status, url, expiry)
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s\tsize=%d\tttl=%s\n", e.Key, e.Size, expiry)
+		}
 	}
 	if len(entries) == 0 {
 		log.Info().Msg("cache is empty")

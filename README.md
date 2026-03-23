@@ -48,17 +48,29 @@ limpet do -I https://example.com
 # Custom HTTP method
 limpet do -X POST https://example.com/api
 
+# Fetch multiple URLs concurrently
+limpet do https://example.com https://example.org https://example.net
+
+# Control concurrency (default: 4)
+limpet do -j 8 url1 url2 url3 ...
+
+# Write response body to file
+limpet do -o page.html https://example.com
+
 # Run as a caching HTTP proxy
 limpet proxy -a localhost:8080
 
 # Allow proxying to private/loopback addresses (dev use)
 limpet proxy --allow-private
 
-# List cached entries
+# List cached entries (shows URL, status, TTL)
 limpet cache ls
 
-# List as JSON
+# List as JSON (includes URL and status)
 limpet cache ls --json
+
+# Fast listing (keys only, skips reading page metadata)
+limpet cache ls --keys-only
 
 # List cached entries for a specific host
 limpet cache ls example.com
@@ -162,7 +174,8 @@ page, _ = cl.Get(ctx, "https://example.com")
 - `limpet.WithStealth()` -- always use stealth transport (browser TLS fingerprint, bypasses Cloudflare)
 - `limpet.WithChromiumSandbox(false)` -- disable Chromium OS sandbox (for CI containers)
 - `limpet.WithHTTPClient(hc)` -- custom `*http.Client` (proxies, TLS settings)
-- `limpet.WithRateLimit(10)` -- set programmatic rate limit
+- `limpet.WithRateLimit(10)` -- set global rate limit
+- `limpet.WithPerHostRateLimit(2)` -- per-hostname rate limit (applied in addition to global)
 - `limpet.WithRequestBodyLimit(10e6)` -- max request body for cache key (default 10 MB, 0 = no limit)
 - `limpet.WithResponseBodyLimit(100e6)` -- max response body to cache (default 100 MB, 0 = no limit)
 - `limpet.WithIgnoreHeaders("User-Agent", "Accept-Encoding")` -- exclude headers from cache key
