@@ -573,11 +573,13 @@ func (c *Client) retryDo(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		// Rate limit.
+		// Rate limit (context-aware: cancellation aborts the wait).
+		var lim Limiter = c.rateLimit
 		if val, ok := req.Context().Value(ctxKeyLimiter{}).(ctxValLimiter); ok {
-			val.Limiter.Take()
-		} else {
-			c.rateLimit.Take()
+			lim = val.Limiter
+		}
+		if err := takeWithContext(ctx, lim); err != nil {
+			return err
 		}
 		c.requests.Add(1)
 
@@ -924,6 +926,23 @@ type ctxValLimiter struct {
 // Limiter is a rate limiter interface compatible with go.uber.org/ratelimit.
 type Limiter interface {
 	Take() time.Time
+}
+
+// takeWithContext calls lim.Take() in a goroutine so that ctx cancellation
+// can abort the wait. Returns ctx.Err() if the context is cancelled before
+// Take() returns.
+func takeWithContext(ctx context.Context, lim Limiter) error {
+	done := make(chan struct{})
+	go func() {
+		lim.Take()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // latestPageVersion is the current cache page schema version.
