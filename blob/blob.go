@@ -474,10 +474,12 @@ func (bu *Bucket) ListCache(prefix string) ([]CacheEntry, error) {
 }
 
 // DeleteBlob removes a key from both the remote bucket and local cache.
+// Waits for any in-flight async remote writes to complete first.
 func (bu *Bucket) DeleteBlob(ctx context.Context, key string) error {
 	if bu.closed.Load() {
 		return ErrClosed
 	}
+	bu.writeWG.Wait() // ensure async writes complete before delete
 	key = storageKey(key)
 	if bu.bucket != nil {
 		if err := bu.bucket.Delete(ctx, key); err != nil {
@@ -503,6 +505,7 @@ func (bu *Bucket) PurgeCache(prefix string) (int, error) {
 	if bu.closed.Load() {
 		return 0, ErrClosed
 	}
+	bu.writeWG.Wait() // ensure async writes complete before purge
 	if bu.cache == nil {
 		return 0, nil
 	}

@@ -20,36 +20,35 @@ import (
 	azuretls "github.com/Noooste/azuretls-client"
 	"github.com/playwright-community/playwright-go"
 	"github.com/rs/zerolog/log"
-	"go.uber.org/ratelimit"
+	"golang.org/x/time/rate"
 
 	"github.com/arclabs561/limpet/blob"
 )
 
 // parseRateLimit parses a rate limit string like "100", "10/1m", or "none".
-func parseRateLimit(raw string) (ratelimit.Limiter, error) {
+func parseRateLimit(raw string) (*rate.Limiter, error) {
 	switch strings.ToLower(raw) {
 	case "none", "unlimited", "disabled", "off", "nolimit":
-		return ratelimit.NewUnlimited(), nil
+		return rate.NewLimiter(rate.Inf, 0), nil
 	}
 	parts := strings.SplitN(raw, "/", 2)
-	rate, err := strconv.ParseInt(parts[0], 10, 0)
+	count, err := strconv.ParseFloat(parts[0], 64)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse rate %q: %w", raw, err)
 	}
-	var opts []ratelimit.Option
+	per := time.Second
 	if len(parts) == 2 {
-		per := parts[1]
-		// Prefix bare duration units (e.g. "s", "m") with "1" so time.ParseDuration works.
-		if len(per) > 0 && (per[0] < '0' || per[0] > '9') {
-			per = "1" + per
+		s := parts[1]
+		if len(s) > 0 && (s[0] < '0' || s[0] > '9') {
+			s = "1" + s
 		}
-		dur, err := time.ParseDuration(per)
+		per, err = time.ParseDuration(s)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse rate duration %q: %w", raw, err)
 		}
-		opts = append(opts, ratelimit.Per(dur))
 	}
-	return ratelimit.New(int(rate), opts...), nil
+	rps := count / per.Seconds()
+	return rate.NewLimiter(rate.Limit(rps), int(count)), nil
 }
 
 // Client fetches web pages with automatic caching.
@@ -66,9 +65,9 @@ type Client struct {
 	respBodyLimit   int64 // no limit when <= 0
 	userAgent       string
 	retry           RetryConfig
-	rateLimit       ratelimit.Limiter
+	rateLimit       *rate.Limiter
 	perHostRPS      int // 0 means disabled
-	hostLimiters    sync.Map // hostname -> ratelimit.Limiter
+	hostLimiters    sync.Map // hostname -> *rate.Limiter
 	startedAt       time.Time
 	requests        atomic.Uint64
 }
@@ -152,10 +151,15 @@ func WithUserAgent(ua string) Option {
 	return func(c *Client) { c.userAgent = ua }
 }
 
-// WithRateLimit sets a global programmatic rate limit, overriding the env var.
-func WithRateLimit(rps int, opts ...ratelimit.Option) Option {
+// WithRateLimit sets a global rate limit in requests per second, overriding
+// the env var. Burst allows short bursts above the steady rate (default 1).
+func WithRateLimit(rps int, burst ...int) Option {
 	return func(c *Client) {
-		c.rateLimit = ratelimit.New(rps, opts...)
+		b := 1
+		if len(burst) > 0 && burst[0] > 0 {
+			b = burst[0]
+		}
+		c.rateLimit = rate.NewLimiter(rate.Limit(rps), b)
 	}
 }
 
@@ -240,7 +244,7 @@ func NewClient(
 			MaxWait:  1 * time.Minute,
 			Jitter:   1 * time.Second,
 		},
-		rateLimit: ratelimit.New(100),
+		rateLimit: rate.NewLimiter(100, 1),
 		startedAt: time.Now(),
 	}
 
@@ -602,18 +606,17 @@ func (c *Client) retryDo(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		// Rate limit (context-aware: cancellation aborts the wait).
-		var lim Limiter = c.rateLimit
+		// Rate limit (context-aware via x/time/rate.Wait).
+		lim := c.rateLimit
 		if val, ok := req.Context().Value(ctxKeyLimiter{}).(ctxValLimiter); ok {
 			lim = val.Limiter
 		}
-		if err := takeWithContext(ctx, lim); err != nil {
+		if err := lim.Wait(ctx); err != nil {
 			return err
 		}
 		// Per-host rate limit (in addition to the global limit above).
 		if c.perHostRPS > 0 && req.URL != nil {
-			hostLim := c.hostLimiter(req.URL.Hostname())
-			if err := takeWithContext(ctx, hostLim); err != nil {
+			if err := c.hostLimiter(req.URL.Hostname()).Wait(ctx); err != nil {
 				return err
 			}
 		}
@@ -951,46 +954,25 @@ type DoConfig struct {
 	// captcha/block pages matching this regexp.
 	SilentThrottle *regexp.Regexp
 	// Limiter applies a per-request rate limiter instead of the client default.
-	Limiter Limiter
+	// Create with rate.NewLimiter(rate.Limit(rps), burst).
+	Limiter *rate.Limiter
 }
 
 type ctxKeyLimiter struct{}
 type ctxValLimiter struct {
-	Limiter Limiter
-}
-
-// Limiter is a rate limiter interface compatible with go.uber.org/ratelimit.
-type Limiter interface {
-	Take() time.Time
+	Limiter *rate.Limiter
 }
 
 // hostLimiter returns a per-hostname rate limiter, creating one on first access.
-func (c *Client) hostLimiter(hostname string) ratelimit.Limiter {
+func (c *Client) hostLimiter(hostname string) *rate.Limiter {
 	if v, ok := c.hostLimiters.Load(hostname); ok {
-		return v.(ratelimit.Limiter)
+		return v.(*rate.Limiter)
 	}
-	lim := ratelimit.New(c.perHostRPS)
+	lim := rate.NewLimiter(rate.Limit(c.perHostRPS), 1)
 	actual, _ := c.hostLimiters.LoadOrStore(hostname, lim)
-	return actual.(ratelimit.Limiter)
+	return actual.(*rate.Limiter)
 }
 
-// takeWithContext calls lim.Take() in a goroutine so that ctx cancellation
-// can abort the wait. Returns ctx.Err() if the context is cancelled before
-// Take() returns. On cancellation, the goroutine remains alive until the
-// rate limiter releases the token (bounded by 1/rate duration).
-func takeWithContext(ctx context.Context, lim Limiter) error {
-	done := make(chan struct{})
-	go func() {
-		lim.Take()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
 
 // latestPageVersion is the current cache page schema version.
 const latestPageVersion = 1
