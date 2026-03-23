@@ -626,6 +626,65 @@ func TestClientPerHostRateLimit(t *testing.T) {
 	}
 }
 
+func TestClientAdaptiveRate(t *testing.T) {
+	bucket := setupClientBucket(t)
+	cl, err := NewClient(t.Context(), bucket,
+		WithPerHostRateLimit(100),
+		WithAdaptiveRate(true),
+		WithRetry(RetryConfig{Attempts: 1}),
+	)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	var reqCount atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := reqCount.Add(1)
+		if n <= 2 {
+			w.WriteHeader(429) // first 2 requests get throttled
+			_, _ = w.Write([]byte("too many requests"))
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(svr.Close)
+
+	// First request: 429 -> should halve rate.
+	ctx := WithCachePolicy(t.Context(), CachePolicyReplace)
+	_, err = cl.Get(ctx, svr.URL+"/adaptive")
+	var se *StatusError
+	if !errors.As(err, &se) || se.StatusCode() != 429 {
+		t.Fatalf("expected StatusError 429, got: %v", err)
+	}
+
+	// Check the host limiter rate was reduced.
+	hostname := "127.0.0.1"
+	lim := cl.hostLimiter(hostname)
+	if lim.Limit() >= 100 {
+		t.Errorf("expected rate < 100 after 429, got %v", lim.Limit())
+	}
+
+	// Second request: another 429 -> halve again.
+	_, _ = cl.Get(ctx, svr.URL+"/adaptive")
+	rateAfterTwo := lim.Limit()
+	if rateAfterTwo >= 50 {
+		t.Errorf("expected rate < 50 after second 429, got %v", rateAfterTwo)
+	}
+
+	// Third request: success -> should start restoring.
+	page, err := cl.Get(ctx, svr.URL+"/adaptive")
+	if err != nil {
+		t.Fatalf("expected success on third request: %v", err)
+	}
+	if string(page.Response.Body) != "ok" {
+		t.Errorf("body = %q", page.Response.Body)
+	}
+	if lim.Limit() <= rateAfterTwo {
+		t.Errorf("expected rate to increase after success, got %v (was %v)", lim.Limit(), rateAfterTwo)
+	}
+}
+
 func TestClientSilentThrottle(t *testing.T) {
 	bucket := setupClientBucket(t)
 	cl, err := NewClient(t.Context(), bucket,
