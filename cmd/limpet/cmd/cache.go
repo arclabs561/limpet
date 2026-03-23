@@ -44,6 +44,13 @@ var cachePurgeCmd = &cobra.Command{
 	RunE:  cachePurgeRunE,
 }
 
+var cacheStatsCmd = &cobra.Command{
+	Use:   "stats",
+	Short: "Show cache statistics (entry count, total size)",
+	Args:  cobra.NoArgs,
+	RunE:  cacheStatsRunE,
+}
+
 func init() {
 	cacheLsCmd.Flags().BoolP("json", "j", false, "output as JSON")
 	cacheLsCmd.Flags().BoolP("keys-only", "k", false, "show cache keys only (skip reading page metadata)")
@@ -54,6 +61,7 @@ func init() {
 	cacheCmd.AddCommand(cacheGetCmd)
 	cacheCmd.AddCommand(cacheRmCmd)
 	cacheCmd.AddCommand(cachePurgeCmd)
+	cacheCmd.AddCommand(cacheStatsCmd)
 }
 
 func cacheLsRunE(cmd *cobra.Command, args []string) error {
@@ -217,4 +225,58 @@ func cachePurgeRunE(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "purged %d entries\n", n)
 	return nil
+}
+
+func cacheStatsRunE(cmd *cobra.Command, _ []string) error {
+	bucket, err := newBucket(cmd)
+	if err != nil {
+		return err
+	}
+	defer bucket.Close()
+
+	entries, err := bucket.ListCache("")
+	if err != nil {
+		return fmt.Errorf("failed to list cache: %w", err)
+	}
+	if entries == nil {
+		return fmt.Errorf("cache is disabled (--no-cache)")
+	}
+
+	var totalSize int64
+	var oldest, newest uint64
+	for _, e := range entries {
+		totalSize += e.Size
+		if e.ExpiresAt > 0 {
+			if oldest == 0 || e.ExpiresAt < oldest {
+				oldest = e.ExpiresAt
+			}
+			if e.ExpiresAt > newest {
+				newest = e.ExpiresAt
+			}
+		}
+	}
+
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "entries:     %d\n", len(entries))
+	fmt.Fprintf(out, "size:        %s (compressed)\n", formatBytes(totalSize))
+	if oldest > 0 {
+		fmt.Fprintf(out, "earliest:    %s\n", time.Unix(int64(oldest), 0).Format(time.RFC3339))
+	}
+	if newest > 0 {
+		fmt.Fprintf(out, "latest:      %s\n", time.Unix(int64(newest), 0).Format(time.RFC3339))
+	}
+	return nil
+}
+
+func formatBytes(b int64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(b)/(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(b)/(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(b)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
 }

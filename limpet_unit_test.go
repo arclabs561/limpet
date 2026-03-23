@@ -2,8 +2,10 @@ package limpet
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -259,6 +261,41 @@ func TestArchiveKey(t *testing.T) {
 			t.Errorf("archivePrefix = %q, want %q", pfx, want)
 		}
 	})
+}
+
+func TestClassifyError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want FetchErrorKind
+	}{
+		{"timeout", context.DeadlineExceeded, FetchErrorTimeout},
+		{"cancelled", context.Canceled, FetchErrorTimeout},
+		{"dns", &net.DNSError{Err: "no such host", Name: "bad.example"}, FetchErrorDNS},
+		{"connect", &net.OpError{Op: "dial", Err: fmt.Errorf("connection refused")}, FetchErrorConnect},
+		{"read", &net.OpError{Op: "read", Err: fmt.Errorf("reset by peer")}, FetchErrorRead},
+		{"tls", fmt.Errorf("tls: handshake failure"), FetchErrorTLS},
+		{"other", fmt.Errorf("something else"), FetchErrorOther},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyError(tt.err)
+			if got != tt.want {
+				t.Errorf("classifyError(%v) = %q, want %q", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFetchErrorUnwrap(t *testing.T) {
+	cause := fmt.Errorf("connection refused")
+	fe := &FetchError{Kind: FetchErrorConnect, URL: "https://example.com", Cause: cause}
+	if !errors.Is(fe, cause) {
+		t.Error("FetchError should unwrap to cause")
+	}
+	if fe.Error() != "fetch https://example.com (connect): connection refused" {
+		t.Errorf("Error() = %q", fe.Error())
+	}
 }
 
 func TestIsStatus(t *testing.T) {

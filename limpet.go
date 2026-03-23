@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
@@ -350,6 +351,57 @@ func (c *Client) errPageStatusNotOK(page *Page) error {
 	return &StatusError{Page: page}
 }
 
+// FetchErrorKind classifies the type of fetch failure.
+type FetchErrorKind string
+
+const (
+	FetchErrorDNS     FetchErrorKind = "dns"
+	FetchErrorConnect FetchErrorKind = "connect"
+	FetchErrorTLS     FetchErrorKind = "tls"
+	FetchErrorTimeout FetchErrorKind = "timeout"
+	FetchErrorRead    FetchErrorKind = "read"
+	FetchErrorOther   FetchErrorKind = "other"
+)
+
+// FetchError wraps a fetch failure with classification and the request URL.
+// Use errors.As to extract the kind for retry/monitoring decisions.
+type FetchError struct {
+	Kind  FetchErrorKind
+	URL   string
+	Cause error
+}
+
+func (e *FetchError) Error() string {
+	return fmt.Sprintf("fetch %s (%s): %v", e.URL, e.Kind, e.Cause)
+}
+
+func (e *FetchError) Unwrap() error { return e.Cause }
+
+func classifyError(err error) FetchErrorKind {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return FetchErrorTimeout
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return FetchErrorDNS
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		if opErr.Op == "dial" {
+			return FetchErrorConnect
+		}
+		if opErr.Op == "read" || opErr.Op == "write" {
+			return FetchErrorRead
+		}
+	}
+	// Check for TLS errors by string matching (crypto/tls doesn't export
+	// all error types as distinct types).
+	if strings.Contains(err.Error(), "tls:") || strings.Contains(err.Error(), "certificate") {
+		return FetchErrorTLS
+	}
+	return FetchErrorOther
+}
+
 // ThrottledError is returned when the fetch is throttled (response matched
 // SilentThrottle pattern after all retry attempts).
 type ThrottledError struct {
@@ -454,7 +506,7 @@ func (c *Client) fetchHTTP(
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
 			}
-			return fmt.Errorf("failed to perform http request: %w", err)
+			return &FetchError{Kind: classifyError(err), URL: req.URL.String(), Cause: err}
 		}
 		rdr := resp.Body
 		if c.respBodyLimit > 0 {
@@ -552,7 +604,7 @@ func (c *Client) fetchStealth(
 		var err error
 		azResp, err = session.Do(azReq)
 		if err != nil {
-			return fmt.Errorf("stealth: request failed: %w", err)
+			return &FetchError{Kind: classifyError(err), URL: req.URL.String(), Cause: err}
 		}
 		return nil
 	}, func() []byte {
@@ -841,7 +893,7 @@ func (c *Client) do(
 	// Cache read: return on hit (Default), or keep for conditional headers (Replace).
 	var cachedPage *Page
 	if policy != CachePolicySkip {
-		if cp, err := c.cache.readPage(ctx, bkey); err == nil {
+		if cp, err := c.cache.readPage(ctx, bkey); err == nil && varyMatch(cp, req) {
 			if policy == CachePolicyDefault {
 				if err := c.errPageStatusNotOK(cp); err != nil {
 					return nil, err
@@ -1074,6 +1126,37 @@ func (p *Page) Stale() bool {
 		}
 	}
 
+	return false
+}
+
+// varyMatch reports whether the current request matches the Vary-specified
+// headers from the cached response. Returns true if there is no Vary header,
+// or if Vary: * (never matches -- entry is uncacheable per RFC 9111).
+func varyMatch(cached *Page, req *http.Request) bool {
+	vary := cached.Response.Header.Get("Vary")
+	if vary == "" {
+		return true
+	}
+	if strings.TrimSpace(vary) == "*" {
+		return false // Vary: * means the response is unique to this request
+	}
+	for _, field := range strings.Split(vary, ",") {
+		field = strings.TrimSpace(field)
+		if !strings.EqualFold(cached.Request.Header.Get(field), req.Header.Get(field)) {
+			return false
+		}
+	}
+	return true
+}
+
+// hasImmutable reports whether Cache-Control includes the immutable directive.
+func (p *Page) hasImmutable() bool {
+	cc := p.Response.Header.Get("Cache-Control")
+	for _, directive := range strings.Split(cc, ",") {
+		if strings.EqualFold(strings.TrimSpace(directive), "immutable") {
+			return true
+		}
+	}
 	return false
 }
 
