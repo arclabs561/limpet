@@ -1077,6 +1077,36 @@ func (p *Page) Stale() bool {
 	return false
 }
 
+// staleWhileRevalidateOK reports whether this page is stale but within the
+// stale-while-revalidate window (RFC 5861 / RFC 9111). Returns false if not
+// stale, or if there's no stale-while-revalidate directive.
+func (p *Page) staleWhileRevalidateOK() bool {
+	if !p.Stale() {
+		return false // still fresh, no revalidation needed
+	}
+	cc := p.Response.Header.Get("Cache-Control")
+	if cc == "" {
+		return false
+	}
+	maxAge := 0
+	swr := 0
+	for _, directive := range strings.Split(cc, ",") {
+		directive = strings.TrimSpace(strings.ToLower(directive))
+		if strings.HasPrefix(directive, "max-age=") {
+			maxAge, _ = strconv.Atoi(strings.TrimPrefix(directive, "max-age="))
+		}
+		if strings.HasPrefix(directive, "stale-while-revalidate=") {
+			swr, _ = strconv.Atoi(strings.TrimPrefix(directive, "stale-while-revalidate="))
+		}
+	}
+	if swr <= 0 {
+		return false
+	}
+	age := time.Since(p.Meta.FetchedAt)
+	window := time.Duration(maxAge+swr) * time.Second
+	return age <= window
+}
+
 // StaleAfter reports whether this cached page was fetched more than maxAge ago.
 // Use this for scraping targets that send no HTTP cache headers.
 func (p *Page) StaleAfter(maxAge time.Duration) bool {
