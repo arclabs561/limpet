@@ -67,6 +67,8 @@ type Client struct {
 	userAgent       string
 	retry           RetryConfig
 	rateLimit       ratelimit.Limiter
+	perHostRPS      int // 0 means disabled
+	hostLimiters    sync.Map // hostname -> ratelimit.Limiter
 	startedAt       time.Time
 	requests        atomic.Uint64
 }
@@ -150,11 +152,18 @@ func WithUserAgent(ua string) Option {
 	return func(c *Client) { c.userAgent = ua }
 }
 
-// WithRateLimit sets a programmatic rate limit, overriding the env var.
+// WithRateLimit sets a global programmatic rate limit, overriding the env var.
 func WithRateLimit(rps int, opts ...ratelimit.Option) Option {
 	return func(c *Client) {
 		c.rateLimit = ratelimit.New(rps, opts...)
 	}
+}
+
+// WithPerHostRateLimit creates a separate rate limiter for each hostname,
+// allowing polite per-domain throttling when scraping multiple sites.
+// The global rate limit still applies on top. Pass 0 to disable.
+func WithPerHostRateLimit(rps int) Option {
+	return func(c *Client) { c.perHostRPS = rps }
 }
 
 // RetryConfig controls retry behavior for failed HTTP requests.
@@ -581,6 +590,13 @@ func (c *Client) retryDo(
 		if err := takeWithContext(ctx, lim); err != nil {
 			return err
 		}
+		// Per-host rate limit (in addition to the global limit above).
+		if c.perHostRPS > 0 && req.URL != nil {
+			hostLim := c.hostLimiter(req.URL.Hostname())
+			if err := takeWithContext(ctx, hostLim); err != nil {
+				return err
+			}
+		}
 		c.requests.Add(1)
 
 		err := attempt()
@@ -926,6 +942,16 @@ type ctxValLimiter struct {
 // Limiter is a rate limiter interface compatible with go.uber.org/ratelimit.
 type Limiter interface {
 	Take() time.Time
+}
+
+// hostLimiter returns a per-hostname rate limiter, creating one on first access.
+func (c *Client) hostLimiter(hostname string) ratelimit.Limiter {
+	if v, ok := c.hostLimiters.Load(hostname); ok {
+		return v.(ratelimit.Limiter)
+	}
+	lim := ratelimit.New(c.perHostRPS)
+	actual, _ := c.hostLimiters.LoadOrStore(hostname, lim)
+	return actual.(ratelimit.Limiter)
 }
 
 // takeWithContext calls lim.Take() in a goroutine so that ctx cancellation

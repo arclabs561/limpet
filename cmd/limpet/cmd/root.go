@@ -195,6 +195,14 @@ func mustFlagString(cmd *cobra.Command, name string) string {
 	return val
 }
 
+func mustFlagInt(cmd *cobra.Command, name string) int {
+	val, err := cmd.Flags().GetInt(name)
+	if err != nil {
+		log.Fatal().Err(err).Send()
+	}
+	return val
+}
+
 func mustFlagBool(cmd *cobra.Command, name string) bool {
 	val, err := cmd.Flags().GetBool(name)
 	if err != nil {
