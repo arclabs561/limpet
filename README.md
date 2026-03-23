@@ -48,6 +48,15 @@ limpet do -I https://example.com
 # Custom HTTP method
 limpet do -X POST https://example.com/api
 
+# Custom headers
+limpet do -H "Authorization: Bearer token" -H "Accept: application/json" https://api.example.com
+
+# POST with body
+limpet do -d '{"key":"value"}' https://api.example.com/data
+
+# Request timeout
+limpet do --timeout 10s https://slow.example.com
+
 # Fetch multiple URLs concurrently
 limpet do https://example.com https://example.org https://example.net
 
@@ -225,14 +234,21 @@ err := cl.GetMany(ctx, urls, 5, limpet.DoConfig{}, func(url string, page *limpet
 
 ```go
 page, err := cl.Get(ctx, url)
+
+// Convenience helper for status checks:
+if limpet.IsStatus(err, 404) {
+    fmt.Println("not found")
+}
+
+// Or access the full response via errors.As:
 var statusErr *limpet.StatusError
 if errors.As(err, &statusErr) {
-    fmt.Printf("HTTP %d\n", statusErr.Page.Response.StatusCode)
+    fmt.Printf("HTTP %d, body: %s\n", statusErr.StatusCode(), statusErr.Page.Response.Body)
 }
 
 var throttleErr *limpet.ThrottledError
 if errors.As(err, &throttleErr) {
-    // site returned a captcha/block page matching SilentThrottle pattern
+    fmt.Printf("throttled: %s\n", throttleErr.URL)
 }
 ```
 
@@ -288,6 +304,7 @@ tr := limpet.NewTransport(bucket,
     limpet.TransportWithUserAgent("mybot/1.0"),
     limpet.TransportWithRefreshPatterns(/* ... */),
     limpet.TransportWithStaleIfError(true),
+    limpet.TransportWithPerHostRateLimit(2), // 2 req/s per domain
 )
 
 client := &http.Client{Transport: tr}

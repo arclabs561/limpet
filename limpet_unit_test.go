@@ -3,6 +3,7 @@ package limpet
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -258,6 +259,28 @@ func TestArchiveKey(t *testing.T) {
 			t.Errorf("archivePrefix = %q, want %q", pfx, want)
 		}
 	})
+}
+
+func TestIsStatus(t *testing.T) {
+	page := &Page{Response: PageResponse{StatusCode: 404}}
+	err := &StatusError{Page: page}
+	wrapped := fmt.Errorf("fetch failed: %w", err)
+
+	if !IsStatus(wrapped, 404) {
+		t.Error("IsStatus(404) should be true")
+	}
+	if IsStatus(wrapped, 200) {
+		t.Error("IsStatus(200) should be false")
+	}
+	if IsStatus(wrapped, 404, 500) != true {
+		t.Error("IsStatus(404, 500) should be true (matches 404)")
+	}
+	if IsStatus(nil, 404) {
+		t.Error("IsStatus(nil) should be false")
+	}
+	if IsStatus(fmt.Errorf("not a status error"), 404) {
+		t.Error("IsStatus(non-StatusError) should be false")
+	}
 }
 
 func TestPageStale(t *testing.T) {

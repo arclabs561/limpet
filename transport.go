@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,6 +26,8 @@ type Transport struct {
 
 	cache         cacheLayer
 	rateLimit     ratelimit.Limiter
+	perHostRPS    int // 0 means disabled
+	hostLimiters  sync.Map // hostname -> ratelimit.Limiter
 	respBodyLimit int64
 	userAgent     string
 	flight        singleflight.Group
@@ -155,6 +158,23 @@ func TransportWithRefreshPatterns(patterns ...RefreshPattern) TransportOption {
 // response when the upstream fetch fails, rather than propagating the error.
 func TransportWithStaleIfError(enabled bool) TransportOption {
 	return func(t *Transport) { t.cache.staleIfError = enabled }
+}
+
+// TransportWithPerHostRateLimit creates a separate rate limiter for each
+// hostname, allowing polite per-domain throttling. Applied in addition to
+// the global rate limit set by TransportWithRateLimit.
+func TransportWithPerHostRateLimit(rps int) TransportOption {
+	return func(t *Transport) { t.perHostRPS = rps }
+}
+
+// transportHostLimiter returns a per-hostname rate limiter, creating one on first access.
+func (t *Transport) transportHostLimiter(hostname string) ratelimit.Limiter {
+	if v, ok := t.hostLimiters.Load(hostname); ok {
+		return v.(ratelimit.Limiter)
+	}
+	lim := ratelimit.New(t.perHostRPS)
+	actual, _ := t.hostLimiters.LoadOrStore(hostname, lim)
+	return actual.(ratelimit.Limiter)
 }
 
 func (t *Transport) base() http.RoundTripper {
@@ -289,6 +309,12 @@ func (t *Transport) fetchAndCache(
 ) (*Page, error) {
 	if t.rateLimit != nil {
 		if err := takeWithContext(req.Context(), t.rateLimit); err != nil {
+			return nil, err
+		}
+	}
+	if t.perHostRPS > 0 && req.URL != nil {
+		hostLim := t.transportHostLimiter(req.URL.Hostname())
+		if err := takeWithContext(req.Context(), hostLim); err != nil {
 			return nil, err
 		}
 	}
