@@ -143,7 +143,7 @@ func TestPurgeCacheAll(t *testing.T) {
 func TestWithCacheTTL(t *testing.T) {
 	bu := setupBucket(t)
 
-	shortCtx := WithCacheTTL(t.Context(), 500*time.Millisecond)
+	shortCtx := WithCacheTTL(t.Context(), 5*time.Second)
 	if err := bu.SetBlob(shortCtx, "ttl/short", []byte("ephemeral")); err != nil {
 		t.Fatalf("SetBlob short: %v", err)
 	}

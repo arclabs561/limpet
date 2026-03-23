@@ -67,6 +67,7 @@ type Client struct {
 	retry           RetryConfig
 	rateLimit       *rate.Limiter
 	perHostRPS      int // 0 means disabled
+	adaptiveRate    bool
 	hostLimiters    sync.Map // hostname -> *rate.Limiter
 	startedAt       time.Time
 	requests        atomic.Uint64
@@ -168,6 +169,14 @@ func WithRateLimit(rps int, burst ...int) Option {
 // The global rate limit still applies on top. Pass 0 to disable.
 func WithPerHostRateLimit(rps int) Option {
 	return func(c *Client) { c.perHostRPS = rps }
+}
+
+// WithAdaptiveRate enables adaptive rate limiting. When a 429 (Too Many
+// Requests) or 503 (Service Unavailable) response is received, the per-host
+// rate is halved. On consecutive successes, the rate is gradually restored
+// toward the original. Requires WithPerHostRateLimit to be set.
+func WithAdaptiveRate(enabled bool) Option {
+	return func(c *Client) { c.adaptiveRate = enabled }
 }
 
 // RetryConfig controls retry behavior for failed HTTP requests.
@@ -863,6 +872,11 @@ func (c *Client) do(
 		return nil, fmt.Errorf("failed to fetch page: %w", err)
 	}
 
+	// Adaptive rate limiting: back off on 429/503, restore on success.
+	if c.adaptiveRate && c.perHostRPS > 0 && req.URL != nil {
+		c.adjustHostRate(req.URL.Hostname(), page.Response.StatusCode)
+	}
+
 	// 304 Not Modified: return the cached page if available.
 	if page.Response.StatusCode == 304 && cachedPage != nil {
 		cachedPage.Meta.Source = SourceRevalidated
@@ -961,6 +975,38 @@ type DoConfig struct {
 type ctxKeyLimiter struct{}
 type ctxValLimiter struct {
 	Limiter *rate.Limiter
+}
+
+// adjustHostRate adapts the per-host rate limiter based on response status.
+// Halves rate on 429/503, restores toward original on success.
+func (c *Client) adjustHostRate(hostname string, statusCode int) {
+	lim := c.hostLimiter(hostname)
+	origRate := rate.Limit(c.perHostRPS)
+	switch statusCode {
+	case 429, 503:
+		current := lim.Limit()
+		newRate := current / 2
+		if newRate < 0.1 { // floor at 0.1 rps (1 req per 10s)
+			newRate = 0.1
+		}
+		lim.SetLimit(newRate)
+		log.Warn().
+			Str("host", hostname).
+			Float64("old_rps", float64(current)).
+			Float64("new_rps", float64(newRate)).
+			Int("status", statusCode).
+			Msg("adaptive rate: backing off")
+	default:
+		current := lim.Limit()
+		if current < origRate {
+			// Restore 10% toward original per success.
+			newRate := current + (origRate-current)*0.1
+			if newRate > origRate {
+				newRate = origRate
+			}
+			lim.SetLimit(newRate)
+		}
+	}
 }
 
 // hostLimiter returns a per-hostname rate limiter, creating one on first access.
