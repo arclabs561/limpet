@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -172,7 +173,7 @@ func doFetchOne(
 	customHeaders []string,
 	postData string,
 ) error {
-	var reqBody *strings.Reader
+	var reqBody io.Reader
 	if postData != "" {
 		reqBody = strings.NewReader(postData)
 	}
