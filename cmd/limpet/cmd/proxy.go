@@ -73,12 +73,17 @@ type proxyTarget struct {
 func (s *proxyTarget) HandleConn(downstream net.Conn) {
 	defer downstream.Close() //nolint:errcheck // best-effort close
 
+	// Deadline prevents slow-loris: drop connections that don't send a
+	// complete request within 30 seconds.
+	_ = downstream.SetReadDeadline(time.Now().Add(30 * time.Second))
 	br := bufio.NewReader(downstream)
 	req, err := http.ReadRequest(br)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to read request")
 		return
 	}
+	// Clear deadline for the relay/response phase.
+	_ = downstream.SetReadDeadline(time.Time{})
 	req = req.WithContext(s.ctx)
 	if req.URL == nil || req.URL.Host == "" {
 		log.Error().Stringer("url", req.URL).Msg("invalid request URL")

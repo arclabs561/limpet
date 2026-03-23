@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -55,6 +56,9 @@ var (
 	}
 )
 
+// ErrClosed is returned when an operation is attempted on a closed Bucket.
+var ErrClosed = errors.New("blob: bucket is closed")
+
 // Bucket provides two-tier blob storage (remote + local badger cache).
 type Bucket struct {
 	bucket    *blob.Bucket
@@ -62,6 +66,7 @@ type Bucket struct {
 	cacheTTL  time.Duration
 	stopGC    chan struct{} // closed to stop background GC goroutine
 	closeOnce sync.Once
+	closed    atomic.Bool
 }
 
 // NewBucket creates a Bucket backed by the given URL (file:// or s3://).
@@ -185,6 +190,7 @@ func newBucket(
 
 // Close shuts down the local cache and remote bucket. Safe to call multiple times.
 func (bu *Bucket) Close() {
+	bu.closed.Store(true)
 	bu.closeOnce.Do(func() {
 		close(bu.stopGC)
 		if bu.cache != nil {
@@ -229,6 +235,9 @@ func compressZstd(data []byte) []byte {
 // Data is zstd-compressed in both tiers. If the context carries a TTL from
 // WithCacheTTL, it overrides the bucket default.
 func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte) error {
+	if bu.closed.Load() {
+		return ErrClosed
+	}
 	key = storageKey(key)
 	compressed := compressZstd(data)
 
@@ -315,6 +324,9 @@ func decompressZstdStream(r io.Reader) ([]byte, error) {
 // GetBlob reads data by key, checking the local cache first, then the remote bucket.
 // Both tiers store zstd-compressed data; decompression is transparent.
 func (bu *Bucket) GetBlob(ctx context.Context, key string) (b *Blob, err error) {
+	if bu.closed.Load() {
+		return nil, ErrClosed
+	}
 	if bu.cache == nil && bu.bucket == nil {
 		return nil, errors.New("neither cache nor external bucket is configured")
 	}
@@ -445,6 +457,9 @@ func (bu *Bucket) ListCache(prefix string) ([]CacheEntry, error) {
 
 // DeleteBlob removes a key from both the remote bucket and local cache.
 func (bu *Bucket) DeleteBlob(ctx context.Context, key string) error {
+	if bu.closed.Load() {
+		return ErrClosed
+	}
 	key = storageKey(key)
 	if bu.bucket != nil {
 		if err := bu.bucket.Delete(ctx, key); err != nil {

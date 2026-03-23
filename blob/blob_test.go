@@ -195,3 +195,30 @@ func TestNoCacheBucket(t *testing.T) {
 		t.Errorf("expected nil entries with no cache, got %d", len(entries))
 	}
 }
+
+func TestBucketUseAfterClose(t *testing.T) {
+	bu := setupBucket(t)
+	mustSet(t, bu, "test/before-close", []byte("data"))
+
+	bu.Close()
+
+	// All operations should return ErrClosed after Close.
+	if err := bu.SetBlob(t.Context(), "test/after-close", []byte("data")); !errors.Is(err, ErrClosed) {
+		t.Errorf("SetBlob after Close: got %v, want ErrClosed", err)
+	}
+	if _, err := bu.GetBlob(t.Context(), "test/before-close"); !errors.Is(err, ErrClosed) {
+		t.Errorf("GetBlob after Close: got %v, want ErrClosed", err)
+	}
+	if err := bu.DeleteBlob(t.Context(), "test/before-close"); !errors.Is(err, ErrClosed) {
+		t.Errorf("DeleteBlob after Close: got %v, want ErrClosed", err)
+	}
+
+	// Double close should not panic.
+	bu.Close()
+}
+
+func TestBucketCloseMultipleTimes(t *testing.T) {
+	bu := setupBucket(t)
+	bu.Close()
+	bu.Close() // should not panic
+}

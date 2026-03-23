@@ -1,6 +1,7 @@
 package limpet
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -306,5 +307,172 @@ func TestClientCachePolicyReplace(t *testing.T) {
 	}
 	if hits.Load() != 2 {
 		t.Errorf("hits = %d, want 2 (CachePolicyReplace should re-fetch)", hits.Load())
+	}
+}
+
+func TestClientSilentThrottle(t *testing.T) {
+	bucket := setupClientBucket(t)
+	cl, err := NewClient(t.Context(), bucket,
+		WithRetry(RetryConfig{Attempts: 2, MinWait: 1 * time.Millisecond, MaxWait: 1 * time.Millisecond, Jitter: 1 * time.Millisecond}),
+	)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	// Server always returns a "captcha" page.
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("please solve this captcha to continue"))
+	}))
+	t.Cleanup(svr.Close)
+
+	req, _ := http.NewRequest("GET", svr.URL+"/throttled", nil)
+	cfg := DoConfig{
+		SilentThrottle: regexp.MustCompile(`captcha`),
+		Replace:        true,
+	}
+	_, err = cl.Do(t.Context(), req, cfg)
+	if err == nil {
+		t.Fatal("expected ThrottledError")
+	}
+	var throttleErr *ThrottledError
+	if !errors.As(err, &throttleErr) {
+		t.Fatalf("expected ThrottledError, got %T: %v", err, throttleErr)
+	}
+	if throttleErr.URL == "" {
+		t.Error("ThrottledError.URL is empty, expected the request URL")
+	}
+}
+
+func TestClientSilentThrottleNotTriggered(t *testing.T) {
+	bucket := setupClientBucket(t)
+	cl, err := NewClient(t.Context(), bucket)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("real content here"))
+	}))
+	t.Cleanup(svr.Close)
+
+	req, _ := http.NewRequest("GET", svr.URL+"/ok", nil)
+	cfg := DoConfig{
+		SilentThrottle: regexp.MustCompile(`captcha`),
+		Replace:        true,
+	}
+	page, err := cl.Do(t.Context(), req, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(page.Response.Body) != "real content here" {
+		t.Errorf("body = %q", page.Response.Body)
+	}
+}
+
+func TestClientPerRequestLimiter(t *testing.T) {
+	bucket := setupClientBucket(t)
+	cl, err := NewClient(t.Context(), bucket,
+		WithRateLimit(1), // very slow default
+	)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	var hits atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(svr.Close)
+
+	// Use a per-request limiter that is much faster.
+	fastLimiter := &unlimitedLimiter{}
+
+	req, _ := http.NewRequest("GET", svr.URL+"/fast", nil)
+	cfg := DoConfig{
+		Limiter: fastLimiter,
+		Replace: true,
+	}
+
+	start := time.Now()
+	_, err = cl.Do(t.Context(), req, cfg)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	// With the fast limiter, the request should complete quickly
+	// (not be held by the 1 req/s default limiter).
+	if dur := time.Since(start); dur > 500*time.Millisecond {
+		t.Errorf("request took %v, expected < 500ms with per-request limiter", dur)
+	}
+}
+
+// unlimitedLimiter satisfies the Limiter interface with no rate limiting.
+type unlimitedLimiter struct{}
+
+func (u *unlimitedLimiter) Take() time.Time { return time.Now() }
+
+func TestClientBrowserStealthMutualExclusion(t *testing.T) {
+	bucket := setupClientBucket(t)
+	cl, err := NewClient(t.Context(), bucket)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	req, _ := http.NewRequest("GET", "http://localhost/test", nil)
+	_, err = cl.Do(t.Context(), req, DoConfig{Browser: true, Stealth: true})
+	if err == nil {
+		t.Error("expected error for Browser + Stealth")
+	}
+}
+
+func TestClientConditionalRevalidation(t *testing.T) {
+	bucket := setupClientBucket(t)
+	cl, err := NewClient(t.Context(), bucket)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	var hits atomic.Int32
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.Header.Get("If-None-Match") == `"v1"` {
+			w.WriteHeader(304)
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		_, _ = w.Write([]byte("original"))
+	}))
+	t.Cleanup(svr.Close)
+
+	// Populate cache.
+	req, _ := http.NewRequest("GET", svr.URL+"/etag", nil)
+	page, err := cl.Do(t.Context(), req, DoConfig{})
+	if err != nil {
+		t.Fatalf("populate: %v", err)
+	}
+	if string(page.Response.Body) != "original" {
+		t.Fatalf("body = %q", page.Response.Body)
+	}
+
+	// Replace: server returns 304, should get cached body back.
+	ctx := WithCachePolicy(t.Context(), CachePolicyReplace)
+	req2, _ := http.NewRequest("GET", svr.URL+"/etag", nil)
+	page, err = cl.Do(ctx, req2, DoConfig{})
+	if err != nil {
+		t.Fatalf("conditional: %v", err)
+	}
+	if string(page.Response.Body) != "original" {
+		t.Errorf("revalidated body = %q, want original", page.Response.Body)
+	}
+	if page.Meta.Source != SourceRevalidated {
+		t.Errorf("source = %q, want %q", page.Meta.Source, SourceRevalidated)
+	}
+	if hits.Load() != 2 {
+		t.Errorf("server hits = %d, want 2", hits.Load())
 	}
 }

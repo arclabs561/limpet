@@ -308,11 +308,14 @@ func (c *Client) errPageStatusNotOK(page *Page) error {
 	return &StatusError{Page: page}
 }
 
-// ThrottledError is returned when the fetch is throttled.
-type ThrottledError struct{}
+// ThrottledError is returned when the fetch is throttled (response matched
+// SilentThrottle pattern after all retry attempts).
+type ThrottledError struct {
+	URL string // the request URL that was throttled
+}
 
 func (e *ThrottledError) Error() string {
-	return "fetch throttled"
+	return fmt.Sprintf("fetch throttled: %s", e.URL)
 }
 
 // Do fetches the given request, returning a cached result if available.
@@ -599,7 +602,7 @@ func (c *Client) retryDo(
 					Str("rate", fmt.Sprintf("%0.3f/m", rate)).
 					Msg("silently throttled")
 				if lastAttempt {
-					return &ThrottledError{}
+					return &ThrottledError{URL: req.URL.String()}
 				}
 				log.Warn().Int("attempt", i).Msg("response is silently throttled, retrying")
 				if err := c.retryWait(ctx, i); err != nil {
