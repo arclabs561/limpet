@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/ratelimit"
+	"golang.org/x/time/rate"
 )
 
 func TestParseRateLimit(t *testing.T) {
@@ -420,7 +420,7 @@ func TestErrPageStatusNotOK(t *testing.T) {
 func TestDoRejectsBrowserAndStealth(t *testing.T) {
 	cl := &Client{
 		mu:        new(sync.Mutex),
-		rateLimit: ratelimit.NewUnlimited(),
+		rateLimit: rate.NewLimiter(rate.Inf, 0),
 		retry:     RetryConfig{Attempts: 1, MinWait: time.Millisecond, MaxWait: time.Millisecond},
 	}
 	req, _ := http.NewRequest("GET", "http://example.com", nil)

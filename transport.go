@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.uber.org/ratelimit"
 	"golang.org/x/sync/singleflight"
+	"golang.org/x/time/rate"
 
 	"github.com/arclabs561/limpet/blob"
 )
@@ -25,9 +25,9 @@ type Transport struct {
 	Base http.RoundTripper
 
 	cache         cacheLayer
-	rateLimit     ratelimit.Limiter
+	rateLimit     *rate.Limiter
 	perHostRPS    int // 0 means disabled
-	hostLimiters  sync.Map // hostname -> ratelimit.Limiter
+	hostLimiters  sync.Map // hostname -> *rate.Limiter
 	respBodyLimit int64
 	userAgent     string
 	flight        singleflight.Group
@@ -47,10 +47,10 @@ type transportStats struct {
 // TransportOption configures a Transport.
 type TransportOption func(*Transport)
 
-// TransportWithRateLimit sets a rate limit on outgoing requests.
-func TransportWithRateLimit(rps int, opts ...ratelimit.Option) TransportOption {
+// TransportWithRateLimit sets a global rate limit on outgoing requests.
+func TransportWithRateLimit(rps int) TransportOption {
 	return func(t *Transport) {
-		t.rateLimit = ratelimit.New(rps, opts...)
+		t.rateLimit = rate.NewLimiter(rate.Limit(rps), 1)
 	}
 }
 
@@ -168,13 +168,13 @@ func TransportWithPerHostRateLimit(rps int) TransportOption {
 }
 
 // transportHostLimiter returns a per-hostname rate limiter, creating one on first access.
-func (t *Transport) transportHostLimiter(hostname string) ratelimit.Limiter {
+func (t *Transport) transportHostLimiter(hostname string) *rate.Limiter {
 	if v, ok := t.hostLimiters.Load(hostname); ok {
-		return v.(ratelimit.Limiter)
+		return v.(*rate.Limiter)
 	}
-	lim := ratelimit.New(t.perHostRPS)
+	lim := rate.NewLimiter(rate.Limit(t.perHostRPS), 1)
 	actual, _ := t.hostLimiters.LoadOrStore(hostname, lim)
-	return actual.(ratelimit.Limiter)
+	return actual.(*rate.Limiter)
 }
 
 func (t *Transport) base() http.RoundTripper {
@@ -308,13 +308,12 @@ func (t *Transport) fetchAndCache(
 	cachedPage *Page,
 ) (*Page, error) {
 	if t.rateLimit != nil {
-		if err := takeWithContext(req.Context(), t.rateLimit); err != nil {
+		if err := t.rateLimit.Wait(req.Context()); err != nil {
 			return nil, err
 		}
 	}
 	if t.perHostRPS > 0 && req.URL != nil {
-		hostLim := t.transportHostLimiter(req.URL.Hostname())
-		if err := takeWithContext(req.Context(), hostLim); err != nil {
+		if err := t.transportHostLimiter(req.URL.Hostname()).Wait(req.Context()); err != nil {
 			return nil, err
 		}
 	}

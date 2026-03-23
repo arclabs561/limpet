@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/arclabs561/limpet/blob"
-	"go.uber.org/ratelimit"
+	"golang.org/x/time/rate"
 )
 
 func setupClientBucket(t *testing.T) *blob.Bucket {
@@ -547,7 +547,7 @@ func TestClientRateLimitRespectsContext(t *testing.T) {
 	bucket := setupClientBucket(t)
 	// Very slow rate limiter: 1 request per 10 seconds.
 	cl, err := NewClient(t.Context(), bucket,
-		WithRateLimit(1, ratelimit.Per(10*time.Second)),
+		WithRateLimit(1), // 1 req/s -- second request will block ~1s
 		WithRetry(RetryConfig{Attempts: 1}),
 	)
 	if err != nil {
@@ -577,11 +577,10 @@ func TestClientRateLimitRespectsContext(t *testing.T) {
 	dur := time.Since(start)
 
 	if err == nil {
-		t.Fatal("expected context deadline error")
+		t.Fatal("expected rate-limit or context deadline error")
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("error = %v, want context.DeadlineExceeded", err)
-	}
+	// x/time/rate returns either context.DeadlineExceeded or its own
+	// "would exceed context deadline" error depending on timing.
 	if dur > 2*time.Second {
 		t.Errorf("took %v, expected < 2s (should abort on context cancel, not wait for rate limit)", dur)
 	}
@@ -706,7 +705,7 @@ func TestClientPerRequestLimiter(t *testing.T) {
 	t.Cleanup(svr.Close)
 
 	// Use a per-request limiter that is much faster.
-	fastLimiter := &unlimitedLimiter{}
+	fastLimiter := rate.NewLimiter(rate.Inf, 0)
 
 	req, _ := http.NewRequest("GET", svr.URL+"/fast", nil)
 	cfg := DoConfig{
@@ -726,10 +725,6 @@ func TestClientPerRequestLimiter(t *testing.T) {
 	}
 }
 
-// unlimitedLimiter satisfies the Limiter interface with no rate limiting.
-type unlimitedLimiter struct{}
-
-func (u *unlimitedLimiter) Take() time.Time { return time.Now() }
 
 func TestClientBrowserStealthMutualExclusion(t *testing.T) {
 	bucket := setupClientBucket(t)
