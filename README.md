@@ -5,24 +5,7 @@
 
 A Go library and CLI for fetching web pages with automatic caching. Supports plain HTTP, stealth transport (browser TLS fingerprint for Cloudflare bypass), and headless browser (Playwright/Chromium) requests. Can run as a caching HTTP proxy with HTTPS CONNECT tunneling.
 
-## Features
-
-- **HTTP + stealth + headless browser**: fetch via standard HTTP, stealth transport (real browser TLS fingerprint), or Playwright-driven Chromium
-- **Blob storage**: cache fetched pages to local filesystem or S3
-- **Deterministic cache keys**: normalized URL+method+headers+body maps to a SHA-256 blob key, with options to exclude headers and query params
-- **Conditional requests**: automatic ETag/If-Modified-Since revalidation in Transport avoids re-downloading unchanged content
-- **Request deduplication**: concurrent Transport requests for the same URL coalesce via singleflight
-- **Version history**: archive timestamped snapshots and diff pages to detect changes
-- **Staleness hints**: check HTTP cache headers or time-based age via `Page.Stale()` / `Page.StaleAfter()`
-- **Per-request cache TTL**: override the default TTL per request via context
-- **Rate limiting**: global and per-host rate limits with exponential backoff
-- **Adaptive rate limiting**: automatic back-off on 429/503 responses, gradual restoration on success
-- **Silent throttle detection**: detect and retry when a site silently serves captcha/block pages
-- **Stale-if-error**: optionally serve cached responses when upstream fails
-- **Stale-while-revalidate**: serve stale responses immediately while refreshing in the background (RFC 5861)
-- **Refresh patterns**: URL-based cache TTL rules (like Squid's refresh_pattern)
-- **Pluggable cache backend**: default badger KV store, replaceable via `KVStore` interface
-- **HTTP proxy mode**: caching HTTP proxy with HTTPS CONNECT tunneling (SSRF-safe, `--allow-private` for dev use)
+Three transport modes: plain HTTP, stealth (browser TLS fingerprint for Cloudflare bypass), and headless browser (Playwright/Chromium). Caches to local filesystem or S3 with deterministic SHA-256 keys. Handles conditional requests, singleflight dedup, per-host and adaptive rate limiting, stale-while-revalidate (RFC 5861), version history, and silent throttle detection. Can run as a caching HTTP proxy with HTTPS CONNECT tunneling.
 
 ## CLI Usage
 
@@ -104,17 +87,7 @@ limpet cache purge
 limpet cache purge example.com
 ```
 
-### Global flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-b`, `--bucket-url` | `file://<config>/bucket` | Blob storage URL (`file://` or `s3://`) |
-| `--cache-dir` | `<config>/cache` | Local cache directory |
-| `--no-cache` | `false` | Disable local caching |
-| `--cache-ttl` | `24h` | Cache TTL (`0` or `forever` for no expiry) |
-| `-L`, `--log-level` | `fatal` | Log level: `trace`, `debug`, `info`, `warn`, `error`, `fatal` |
-| `-F`, `--log-format` | `auto` | Log format: `auto`, `console` |
-| `-c`, `--log-color` | `auto` | Log color: `auto`, `always`, `never` |
+Global flags: `--bucket-url` (blob storage, `file://` or `s3://`), `--cache-dir`, `--no-cache`, `--cache-ttl` (default 24h), `--log-level`. Run `limpet --help` for the full list.
 
 ## Rate Limiting
 
@@ -127,32 +100,6 @@ LIMPET_RATE_LIMIT=none       # Unlimited
 ```
 
 Format: `<count>[/<duration>]`. Duration uses Go syntax (`1s`, `1m`, `1h`).
-
-## Page Schema
-
-Each fetched page is stored as JSON with three sections:
-
-```
-Page
-+-- Meta
-|   +-- Version      (uint16, currently 1)
-|   +-- FetchedAt    (timestamp)
-|   +-- FetchDur     (duration)
-+-- Request
-|   +-- URL
-|   +-- RedirectedURL (if redirected)
-|   +-- Method
-|   +-- Header
-|   +-- Body
-+-- Response
-    +-- StatusCode
-    +-- ProtoMajor, ProtoMinor
-    +-- Header
-    +-- Body
-    +-- ContentLength
-    +-- TransferEncoding
-    +-- Trailer
-```
 
 ## Library Usage
 
@@ -180,24 +127,7 @@ fmt.Println(string(page.Response.Body))
 page, _ = cl.Get(ctx, "https://example.com")
 ```
 
-### Client options (construction time)
-
-- `limpet.WithBrowser()` -- always use headless browser
-- `limpet.WithStealth()` -- always use stealth transport (browser TLS fingerprint, bypasses Cloudflare)
-- `limpet.WithChromiumSandbox(false)` -- disable Chromium OS sandbox (for CI containers)
-- `limpet.WithHTTPClient(hc)` -- custom `*http.Client` (proxies, TLS settings)
-- `limpet.WithRateLimit(10)` -- set global rate limit (requests/second)
-- `limpet.WithPerHostRateLimit(2)` -- per-hostname rate limit (applied in addition to global)
-- `limpet.WithAdaptiveRate(true)` -- auto back-off on 429/503, restore on success (requires per-host rate limit)
-- `limpet.WithRequestBodyLimit(10e6)` -- max request body for cache key (default 10 MB, 0 = no limit)
-- `limpet.WithResponseBodyLimit(100e6)` -- max response body to cache (default 100 MB, 0 = no limit)
-- `limpet.WithIgnoreHeaders("User-Agent", "Accept-Encoding")` -- exclude headers from cache key
-- `limpet.WithIgnoreParams("_t", "token", "utm_source")` -- exclude query params from cache key
-- `limpet.WithUserAgent("mybot/1.0")` -- default User-Agent header (applied if not already set)
-- `limpet.WithCacheStatuses(200, 301, 404)` -- cache non-200 responses (default: 200 only). Cached non-200 responses are returned without `StatusError`.
-- `limpet.WithRetry(limpet.RetryConfig{Attempts: 3, MinWait: 2 * time.Second})` -- configure retry (zero fields keep defaults: 5 attempts, 1s min, 1m max, 1s jitter)
-- `limpet.WithRefreshPatterns(...)` -- URL-based cache TTL rules
-- `limpet.WithStaleIfError(true)` -- return stale cache on upstream failure
+Client options are set at construction time via `With*` functions: `WithBrowser()`, `WithStealth()`, `WithRateLimit(n)`, `WithPerHostRateLimit(n)`, `WithAdaptiveRate(true)`, `WithRetry(...)`, `WithStaleIfError(true)`, and others. See [pkg.go.dev](https://pkg.go.dev/github.com/arclabs561/limpet) for the full list.
 
 ### Per-request options (DoConfig)
 
@@ -341,23 +271,7 @@ ctx = limpet.WithCacheTTL(ctx, 7*24*time.Hour) // weekly
 
 Transport also supports `stale-while-revalidate` (RFC 5861): when a cached response has `Cache-Control: stale-while-revalidate=N` and is stale but within the revalidation window, Transport serves the stale response immediately and refreshes in the background.
 
-### Client vs Transport
-
-Use **Transport** when you want transparent caching as a drop-in `http.RoundTripper` for any `http.Client`. It handles singleflight dedup, conditional requests, stale-while-revalidate, and per-host rate limiting.
-
-Use **Client** when you also need retry with backoff, headless browser/stealth rendering, version history, adaptive rate limiting, or silent throttle detection.
-
-Both share the same cache logic internally (`cacheLayer`) and honor `CachePolicy` from context.
-
-### Custom cache backends
-
-The local cache defaults to badger (embedded KV store). You can provide a custom backend implementing `blob.KVStore`:
-
-```go
-bucket, _ := blob.NewBucket(ctx, "file:///tmp/remote", &blob.BucketConfig{
-    Store: myCustomKVStore, // implements blob.KVStore (Get/Set/Delete/List/Close)
-})
-```
+Use **Transport** for transparent caching as an `http.RoundTripper`. Use **Client** when you also need retry, headless browser/stealth, version history, or adaptive rate limiting. Both share the same cache logic and honor `CachePolicy` from context. The local cache defaults to badger; replace it by implementing `blob.KVStore`.
 
 ## License
 
