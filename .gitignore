@@ -1,3 +1,5 @@
 # Default blob cache is .cache in the current directory, which for development
 # will just be the current directory.
 .cache
+
+.claude/settings.local.json
