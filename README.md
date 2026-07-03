@@ -5,7 +5,7 @@
 
 A Go library and CLI for fetching web pages with automatic caching. Supports plain HTTP, stealth transport (browser TLS fingerprint for Cloudflare bypass), and headless browser (Playwright/Chromium) requests. Can run as a caching HTTP proxy with HTTPS CONNECT tunneling.
 
-Three transport modes: plain HTTP, stealth (browser TLS fingerprint for Cloudflare bypass), and headless browser (Playwright/Chromium). Caches to local filesystem or S3 with deterministic SHA-256 keys. Handles conditional requests, singleflight dedup, per-host and adaptive rate limiting, stale-while-revalidate (RFC 5861), version history, and silent throttle detection. Can run as a caching HTTP proxy with HTTPS CONNECT tunneling.
+Caches to local filesystem or S3 with deterministic SHA-256 keys. Handles conditional requests, singleflight dedup, per-host and adaptive rate limiting, stale-while-revalidate (RFC 5861), version history, and silent throttle detection.
 
 ## CLI Usage
 
