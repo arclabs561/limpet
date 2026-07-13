@@ -1,10 +1,12 @@
-on:
+on: # zizmor: ignore[cache-poisoning] CI tests release branches but never publishes artifacts.
   workflow_dispatch:
   pull_request:
   push:
     branches:
     - main
     - release/*
+permissions:
+  contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
