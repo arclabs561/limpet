@@ -54,6 +54,44 @@ func TestCacheDoesNotPersistCredentials(t *testing.T) {
 	}
 }
 
+// A Set-Cookie issued to one caller must not be stored and replayed to
+// whoever hits the cache next.
+func TestCacheDoesNotPersistSetCookie(t *testing.T) {
+	tr, bucket := setupTransport(t)
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Set-Cookie", "session=s3cret-session; HttpOnly")
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(svr.Close)
+
+	req, _ := http.NewRequestWithContext(t.Context(), "GET", svr.URL+"/login", nil)
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	key, _, err := tr.cache.cacheKey(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := bucket.GetBlob(t.Context(), key)
+	if err != nil {
+		t.Fatalf("expected a cached blob: %v", err)
+	}
+	if strings.Contains(string(b.Data), "s3cret") {
+		t.Fatalf("cached blob contains a Set-Cookie value: %s", b.Data)
+	}
+	var page Page
+	if err := json.Unmarshal(b.Data, &page); err != nil {
+		t.Fatal(err)
+	}
+	if got := page.Response.Header.Get("Content-Type"); got != "text/plain" {
+		t.Errorf("non-secret response header dropped: Content-Type = %q", got)
+	}
+}
+
 // RFC 9111 section 5.2.2.5: a cache must not store a no-store response.
 func TestTransportNoStoreNotCached(t *testing.T) {
 	tr, _ := setupTransport(t)

@@ -89,6 +89,12 @@ func (cl *cacheLayer) writePage(ctx context.Context, key string, page *Page, req
 			stored.Request.Header.Del(h)
 		}
 	}
+	// A Set-Cookie belongs to the caller that received it; a cache hit
+	// would hand it to every later caller.
+	if page.Response.Header.Get("Set-Cookie") != "" {
+		stored.Response.Header = page.Response.Header.Clone()
+		stored.Response.Header.Del("Set-Cookie")
+	}
 	if ttl := cl.bucket.WriteTTL(ctx); ttl > 0 {
 		stored.Meta.ExpiresAt = time.Now().Add(ttl)
 	} else {
