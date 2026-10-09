@@ -86,6 +86,11 @@ Client options are set at construction time via `With*` functions:
 `WithStaleIfError(true)`. See [pkg.go.dev](https://pkg.go.dev/github.com/arclabs561/limpet)
 for the full API.
 
+`WithStealth()` (CLI `-S`) sends requests through
+[azuretls](https://github.com/Noooste/azuretls-client) with a browser TLS
+fingerprint, which gets past Cloudflare-style bot detection that rejects Go's
+default TLS handshake.
+
 ## Transport
 
 ```go
