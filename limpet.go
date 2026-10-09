@@ -19,7 +19,7 @@ import (
 	"time"
 
 	azuretls "github.com/Noooste/azuretls-client"
-	"github.com/playwright-community/playwright-go"
+	"github.com/mxschmitt/playwright-go"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/time/rate"
 
