@@ -247,6 +247,17 @@ func WithCacheTTL(ctx context.Context, ttl time.Duration) context.Context {
 	return context.WithValue(ctx, ctxKeyCacheTTL{}, ttl)
 }
 
+// WriteTTL returns the TTL that SetBlob applies to a write made with ctx: the
+// WithCacheTTL override if present, else the bucket default. 0 means no
+// expiry. Only the local tier enforces it; callers that need expiry in the
+// remote tier must record it in the blob itself.
+func (bu *Bucket) WriteTTL(ctx context.Context) time.Duration {
+	if override, ok := ctx.Value(ctxKeyCacheTTL{}).(time.Duration); ok {
+		return override
+	}
+	return bu.cacheTTL
+}
+
 // storageKey appends the .zst suffix to a logical key, producing the
 // actual key used in both badger and the remote bucket. All blob operations
 // must use this to ensure consistent key mapping.
@@ -271,11 +282,7 @@ func (bu *Bucket) SetBlob(ctx context.Context, key string, data []byte) error {
 
 	// Write to local cache first (fast path).
 	if bu.cache != nil {
-		ttl := bu.cacheTTL
-		if override, ok := ctx.Value(ctxKeyCacheTTL{}).(time.Duration); ok {
-			ttl = override
-		}
-		if err := bu.cache.Set([]byte(key), compressed, ttl); err != nil {
+		if err := bu.cache.Set([]byte(key), compressed, bu.WriteTTL(ctx)); err != nil {
 			log.Err(err).Msg("failed to set cache")
 		}
 	}

@@ -256,12 +256,15 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 					resp.Header.Set("X-Limpet-Source", "stale")
 					return resp, nil
 				}
-				t.stats.hits.Add(1)
-				resp := page.HTTPResponse()
-				resp.Header.Set("X-Limpet-Source", page.Meta.Source)
-				return resp, nil
+				if !page.Stale() {
+					t.stats.hits.Add(1)
+					resp := page.HTTPResponse()
+					resp.Header.Set("X-Limpet-Source", page.Meta.Source)
+					return resp, nil
+				}
+				// Stale (max-age, Expires, no-cache): revalidate below.
 			}
-			// Replace: keep cached page for conditional request headers.
+			// Replace or stale: keep cached page for conditional request headers.
 			cachedPage = page
 			req = setConditionalHeaders(req, page)
 		} else if policy == CachePolicyDefault {
@@ -269,11 +272,11 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 
-	// Replace-policy requests bypass singleflight: they carry per-caller
-	// conditional headers and a per-caller cachedPage for 304 handling.
-	// Coalescing them with cache-miss requests would leak one caller's
-	// state into another's flight.
-	if policy == CachePolicyReplace {
+	// Replace-policy and revalidating requests bypass singleflight: they carry
+	// per-caller conditional headers and a per-caller cachedPage for 304
+	// handling. Coalescing them with cache-miss requests would leak one
+	// caller's state into another's flight.
+	if policy == CachePolicyReplace || cachedPage != nil {
 		page, err := t.fetchAndCache(req, key, policy, cachedPage)
 		if err != nil {
 			if t.cache.staleIfError && cachedPage != nil {
@@ -289,15 +292,28 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return resp, nil
 	}
 
-	// Default/Skip: coalesce concurrent requests via singleflight.
-	v, err, shared := t.flight.Do(key, func() (any, error) {
-		page, err := t.fetchAndCache(req, key, policy, nil)
+	// Default/Skip: coalesce concurrent requests via singleflight. The shared
+	// fetch must not inherit one caller's cancellation, or that caller giving
+	// up fails every coalesced request; each caller waits on its own context.
+	ch := t.flight.DoChan(key, func() (any, error) {
+		shared := req.WithContext(context.WithoutCancel(req.Context()))
+		page, err := t.fetchAndCache(shared, key, policy, nil)
 		if err != nil {
 			t.flight.Forget(key)
 			return nil, err
 		}
 		return page, nil
 	})
+	var (
+		v      any
+		shared bool
+	)
+	select {
+	case <-req.Context().Done():
+		return nil, req.Context().Err()
+	case r := <-ch:
+		v, err, shared = r.Val, r.Err, r.Shared
+	}
 	if err != nil {
 		// stale-if-error: return cached page on upstream failure.
 		if t.cache.staleIfError && cachedPage != nil {

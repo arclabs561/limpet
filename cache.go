@@ -55,13 +55,25 @@ func (cl *cacheLayer) readPage(ctx context.Context, key string) (*Page, error) {
 	if err := json.Unmarshal(b.Data, page); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal cached page: %w", err)
 	}
+	// The remote tier has no TTL of its own, so expiry is checked here.
+	if !page.Meta.ExpiresAt.IsZero() && time.Now().After(page.Meta.ExpiresAt) {
+		return nil, &blob.NotFoundError{Key: key}
+	}
 	page.Meta.Source = b.Source
 	return page, nil
 }
 
+// credentialHeaders are request headers never written to the cache: blobs
+// are stored on disk and in remote buckets, outside the caller's control.
+var credentialHeaders = []string{"Authorization", "Cookie", "Proxy-Authorization"}
+
 // writePage writes a page to the bucket, applying refresh pattern TTL
-// if no per-request TTL is set on the context.
+// if no per-request TTL is set on the context. Responses or requests marked
+// Cache-Control: no-store are not written (RFC 9111 section 5.2.2.5).
 func (cl *cacheLayer) writePage(ctx context.Context, key string, page *Page, reqURL string) error {
+	if hasNoStore(page.Response.Header) || hasNoStore(page.Request.Header) {
+		return nil
+	}
 	if len(cl.refreshPatterns) > 0 {
 		if _, hasCtxTTL := ctx.Value(blob.CacheTTLKey{}).(time.Duration); !hasCtxTTL {
 			if ttl, ok := matchRefreshTTL(cl.refreshPatterns, reqURL); ok {
@@ -69,11 +81,36 @@ func (cl *cacheLayer) writePage(ctx context.Context, key string, page *Page, req
 			}
 		}
 	}
-	data, err := json.Marshal(page)
+	// Persist a copy: the caller still holds page.
+	stored := *page
+	if page.Request.Header != nil {
+		stored.Request.Header = page.Request.Header.Clone()
+		for _, h := range credentialHeaders {
+			stored.Request.Header.Del(h)
+		}
+	}
+	if ttl := cl.bucket.WriteTTL(ctx); ttl > 0 {
+		stored.Meta.ExpiresAt = time.Now().Add(ttl)
+	} else {
+		stored.Meta.ExpiresAt = time.Time{}
+	}
+	data, err := json.Marshal(&stored)
 	if err != nil {
 		return fmt.Errorf("failed to marshal page: %w", err)
 	}
 	return cl.bucket.SetBlob(ctx, key, data)
+}
+
+// hasNoStore reports whether h carries Cache-Control: no-store.
+func hasNoStore(h http.Header) bool {
+	for _, v := range h.Values("Cache-Control") {
+		for _, directive := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(directive), "no-store") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // setConditionalHeaders adds If-None-Match or If-Modified-Since headers

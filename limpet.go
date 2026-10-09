@@ -1224,6 +1224,9 @@ type PageMeta struct {
 	Source    string        `json:"-"`
 	FetchedAt time.Time     `json:"fetched_at"`
 	FetchDur  time.Duration `json:"fetch_dur"`
+	// ExpiresAt is when the cache entry expires; zero means never. Stored in
+	// the page so every tier enforces it, not only the local KV store's TTL.
+	ExpiresAt time.Time `json:"expires_at,omitzero"`
 }
 
 // PageRequest stores the original HTTP request details.
