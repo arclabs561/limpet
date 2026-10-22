@@ -38,7 +38,7 @@ func init() {
 		"stealth",
 		"S",
 		false,
-		"use stealth transport (browser TLS fingerprint, bypasses Cloudflare)",
+		"use stealth transport (browser TLS fingerprint; not a challenge solver)",
 	)
 	doCmd.Flags().StringP(
 		"method",
