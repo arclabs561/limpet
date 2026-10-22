@@ -27,6 +27,8 @@ TEST_LIVE_HTTP=true go test -tags test_all  # live HTTP tests
 - badger v3 (maintenance mode) -- abstracted behind `KVStore` interface; upgrade or swap when motivated.
 - gocloud.dev pulls ~15 transitive deps for S3 support. Accepted for now.
 - Async remote writes: `SetBlob` writes to local cache synchronously, remote bucket asynchronously. `Close()` and `DeleteBlob` wait for in-flight writes. Trade-off: caller gets success before remote write completes.
+- Cloudflare boundary: `-S` changes TLS/JA3/JA4 presentation; `-B` renders JavaScript but automated browsers are unsupported for production challenges. Do not add Turnstile/interstitial bypass code. Prefer official APIs or an authorized human clearance session.
+- Proxy boundary: plain and stealth paths honor `HTTP(S)_PROXY`; browser routes use the same fetch path. A proxy must reach the target; `504`/TLS hostname mismatch is transport failure, not a stealth failure.
 
 ## Commit style
 

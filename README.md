@@ -88,8 +88,25 @@ for the full API.
 
 `WithStealth()` (CLI `-S`) sends requests through
 [azuretls](https://github.com/Noooste/azuretls-client) with a browser TLS
-fingerprint, which gets past Cloudflare-style bot detection that rejects Go's
-default TLS handshake.
+fingerprint. It addresses TLS/JA3/JA4 fingerprint checks that reject Go's default
+handshake; it is not a CAPTCHA or JavaScript-challenge solver.
+
+## Cloudflare, proxies, and limits
+
+- Use `-S` when a site rejects the TLS fingerprint, and `-B` when the page needs
+  JavaScript rendering. They are not interchangeable.
+- Cloudflare's own documentation states that automated browsers are not
+  supported for solving production challenges. Do not treat `-B` as a Turnstile
+  or interstitial bypass. Use the site's official API, an authorized session,
+  or a human-completed clearance flow.
+- A `cf_clearance` cookie is bound to the visitor/device and rate-limited by the
+  site; do not copy it between machines or bake it into a cache.
+- Plain HTTP and stealth fetches honor `HTTPS_PROXY` / `HTTP_PROXY`. Browser
+  requests are intercepted and fulfilled through the same fetch path, so the
+  proxy must be able to reach the target. A proxy returning `504` or an SSL
+  hostname mismatch is a transport failure, not a fingerprint problem.
+- Respect the target's limits. Limpet's rate limit/cache is not permission to
+  rotate proxies or parallelize around an origin limit.
 
 ## Transport
 
