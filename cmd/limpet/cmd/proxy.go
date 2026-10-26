@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -33,19 +34,29 @@ func init() {
 	proxyCmd.Flags().Bool(
 		"allow-private",
 		false,
-		"allow requests to private/loopback addresses (disables SSRF protection)",
+		"allow requests to private/loopback addresses, including a private "+
+			"upstream HTTP(S)_PROXY (disables SSRF protection)",
+	)
+	proxyCmd.Flags().Bool(
+		"allow-remote",
+		false,
+		"listen on a non-loopback address (the proxy has no authentication)",
 	)
 }
 
 func proxyRunE(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	cl, bucket, err := newClient(cmd)
+	addr := mustFlagString(cmd, "addr")
+	if err := checkListenAddr(addr, mustFlagBool(cmd, "allow-remote")); err != nil {
+		return err
+	}
+	allowPrivate := mustFlagBool(cmd, "allow-private")
+	cl, bucket, err := newClient(cmd, proxyClientOptions(allowPrivate)...)
 	if err != nil {
 		return fmt.Errorf("failed to create client: %w", err)
 	}
 	defer cl.Close()
 	defer bucket.Close()
-	addr := mustFlagString(cmd, "addr")
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", addr, err)
@@ -53,7 +64,6 @@ func proxyRunE(cmd *cobra.Command, args []string) error {
 	defer ln.Close()
 	log.Debug().Str("addr", addr).Msg("starting proxy server")
 
-	allowPrivate := mustFlagBool(cmd, "allow-private")
 	target := &proxyTarget{ctx: ctx, cl: cl, allowPrivate: allowPrivate}
 	for {
 		conn, err := ln.Accept()
@@ -173,7 +183,11 @@ func (s *proxyTarget) handleConnect(downstream net.Conn, req *http.Request) {
 
 	log.Debug().Str("host", host).Msg("CONNECT tunnel")
 
-	upstream, err := net.DialTimeout("tcp", host, 10*time.Second)
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	if !s.allowPrivate {
+		dialer.Control = rejectBlockedDial
+	}
+	upstream, err := dialer.DialContext(s.ctx, "tcp", host)
 	if err != nil {
 		log.Error().Err(err).Str("host", host).Msg("failed to dial upstream")
 		writeHTTPError(downstream, http.StatusBadGateway, err)
@@ -222,9 +236,79 @@ func validateConnectHost(hostport string) error {
 		return fmt.Errorf("DNS lookup failed: %w", err)
 	}
 	for _, ip := range ips {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		if blockedIP(ip) {
 			return fmt.Errorf("CONNECT to %s (%s) blocked: private/loopback address", host, ip)
 		}
 	}
 	return nil
+}
+
+// cgnat is the RFC 6598 shared address space used inside carrier and cloud
+// networks; net.IP.IsPrivate does not cover it.
+var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+func blockedIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() || cgnat.Contains(ip)
+}
+
+// rejectBlockedDial is a net.Dialer Control hook. It checks the address the
+// socket actually connects to, so a hostname that resolved to a public
+// address during validation cannot be re-resolved to a private one.
+func rejectBlockedDial(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid dial address %q: %w", address, err)
+	}
+	if ip := net.ParseIP(host); ip == nil || blockedIP(ip) {
+		return fmt.Errorf("dial to %s blocked: private/loopback address", address)
+	}
+	return nil
+}
+
+// proxyClientOptions returns the HTTP client the proxy fetches with. Redirects
+// go back to the downstream client instead of being followed, so each hop is
+// validated as a new request. Without allowPrivate, dials to private addresses
+// are refused at connect time.
+func proxyClientOptions(allowPrivate bool) []limpet.Option {
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	if !allowPrivate {
+		dialer.Control = rejectBlockedDial
+	}
+	hc := &http.Client{
+		Transport: &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
+			DialContext:         dialer.DialContext,
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 100,
+			IdleConnTimeout:     90 * time.Second,
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	return []limpet.Option{limpet.WithHTTPClient(hc)}
+}
+
+// checkListenAddr refuses a non-loopback listen address unless allowRemote is
+// set: the proxy has no authentication.
+func checkListenAddr(addr string, allowRemote bool) error {
+	if allowRemote {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid listen address %q: %w", addr, err)
+	}
+	if host == "localhost" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf(
+		"refusing to listen on %q: the proxy has no authentication; "+
+			"use a loopback address or pass --allow-remote", addr,
+	)
 }
