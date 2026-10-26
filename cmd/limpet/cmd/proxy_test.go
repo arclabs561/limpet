@@ -145,6 +145,9 @@ func TestValidateConnectHost(t *testing.T) {
 		{"172.16.0.1:443", true},
 		{"169.254.1.1:443", true},
 		{"[::1]:443", true},
+		{"0.0.0.0:443", true},
+		{"[::]:443", true},
+		{"100.64.0.1:443", true},
 		// Public addresses should pass.
 		{"1.1.1.1:443", false},
 		{"8.8.8.8:443", false},
@@ -162,6 +165,109 @@ func TestValidateConnectHost(t *testing.T) {
 	}
 }
 
+func TestBlockedIPCoversSharedAndUnspecifiedRanges(t *testing.T) {
+	tests := []struct {
+		ip   string
+		want bool
+	}{
+		{"100.64.0.1", true},
+		{"100.127.255.254", true},
+		{"100.128.0.1", false},
+		{"0.0.0.0", true},
+		{"::", true},
+		{"8.8.8.8", false},
+	}
+	for _, tt := range tests {
+		if got := blockedIP(net.ParseIP(tt.ip)); got != tt.want {
+			t.Errorf("blockedIP(%s) = %v, want %v", tt.ip, got, tt.want)
+		}
+	}
+}
+
+// The plain-HTTP path must refuse private targets when it dials, not only
+// when it validates the hostname.
+func TestProxyClientRefusesPrivateDial(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("internal"))
+	}))
+	t.Cleanup(origin.Close)
+
+	bucket, err := blob.NewBucket(t.Context(), t.TempDir(), &blob.BucketConfig{CacheDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("new bucket: %v", err)
+	}
+	t.Cleanup(func() { bucket.Close() })
+	cl, err := limpet.NewClient(t.Context(), bucket, proxyClientOptions(false)...)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	t.Cleanup(cl.Close)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, origin.URL, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if _, err := cl.Do(t.Context(), req, limpet.DoConfig{}); err == nil {
+		t.Fatal("fetch of a loopback origin succeeded, want a blocked dial")
+	}
+}
+
+// A redirect must reach the downstream client, so the next hop is a new
+// request that goes through validation; following it in the proxy would let
+// a public origin bounce the fetch to an internal address.
+func TestProxyReturnsRedirectsInsteadOfFollowing(t *testing.T) {
+	pt := setupProxy(t)
+	internal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("internal"))
+	}))
+	t.Cleanup(internal.Close)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, internal.URL+"/secret", http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+
+	conn, err := net.DialTimeout("tcp", pt.addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck
+	reqLine := fmt.Sprintf("GET %s/start HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
+		origin.URL, origin.Listener.Addr().String())
+	if _, err := fmt.Fprint(conn, reqLine); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+}
+
+func TestCheckListenAddr(t *testing.T) {
+	tests := []struct {
+		addr        string
+		allowRemote bool
+		wantErr     bool
+	}{
+		{"localhost:8080", false, false},
+		{"127.0.0.1:8080", false, false},
+		{"[::1]:8080", false, false},
+		{":8080", false, true},
+		{"0.0.0.0:8080", false, true},
+		{"192.168.1.5:8080", false, true},
+		{"0.0.0.0:8080", true, false},
+	}
+	for _, tt := range tests {
+		err := checkListenAddr(tt.addr, tt.allowRemote)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("checkListenAddr(%q, %v) = %v, wantErr %v", tt.addr, tt.allowRemote, err, tt.wantErr)
+		}
+	}
+}
+
 type proxyState struct {
 	addr string
 }
@@ -175,7 +281,7 @@ func setupProxyOpts(t *testing.T, allowPrivate bool) proxyState {
 	}
 	t.Cleanup(func() { bucket.Close() })
 
-	cl, err := limpet.NewClient(t.Context(), bucket)
+	cl, err := limpet.NewClient(t.Context(), bucket, proxyClientOptions(allowPrivate)...)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}

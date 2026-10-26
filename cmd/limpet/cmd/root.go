@@ -153,13 +153,13 @@ func newBucket(cmd *cobra.Command) (*blob.Bucket, error) {
 
 // newClient creates a Client and its backing Bucket. The caller must close
 // both: cl.Close() for browser resources, bucket.Close() for the cache.
-func newClient(cmd *cobra.Command) (*limpet.Client, *blob.Bucket, error) {
+func newClient(cmd *cobra.Command, opts ...limpet.Option) (*limpet.Client, *blob.Bucket, error) {
 	bucket, err := newBucket(cmd)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create bucket: %w", err)
 	}
 	ctx := cmd.Context()
-	cl, err := limpet.NewClient(ctx, bucket)
+	cl, err := limpet.NewClient(ctx, bucket, opts...)
 	if err != nil {
 		bucket.Close()
 		return nil, nil, fmt.Errorf("failed to create client: %w", err)
