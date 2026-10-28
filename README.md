@@ -6,8 +6,8 @@ Caching HTTP fetcher and proxy.
 
 `limpet` fetches web pages through a Go client, CLI, or `http.RoundTripper`.
 Responses are cached on the local filesystem or S3 with deterministic keys.
-Conditional requests, request coalescing, rate limits, version history, and
-stale-if-error are built into the fetch path.
+It can revalidate cached responses, combine concurrent requests for the same
+page, and serve stale content when a fetch fails.
 
 ## Install
 
@@ -30,19 +30,19 @@ Global flags include `--bucket-url`, `--cache-dir`, `--no-cache`,
 `--cache-ttl`, and `--log-level`. See [docs/cli.md](docs/cli.md) or
 `limpet --help` for the full command list.
 
-## Rate Limits
+## Rate limits
 
 Set the `LIMPET_RATE_LIMIT` environment variable:
 
 ```sh
-LIMPET_RATE_LIMIT=100        # 100 requests/second (default)
-LIMPET_RATE_LIMIT=10/1m      # 10 requests/minute
-LIMPET_RATE_LIMIT=none       # Unlimited
+export LIMPET_RATE_LIMIT=100    # 100 requests/second (default)
+export LIMPET_RATE_LIMIT=10/1m  # 10 requests/minute
+export LIMPET_RATE_LIMIT=none   # No rate limit
 ```
 
 Format: `<count>[/<duration>]`. Duration uses Go syntax (`1s`, `1m`, `1h`).
 
-## Go Client
+## Go client
 
 ```go
 import (
@@ -54,21 +54,30 @@ import (
 )
 
 ctx := context.Background()
-bucket, _ := blob.NewBucket(ctx, "file:///tmp/limpet-cache", nil)
+bucket, err := blob.NewBucket(ctx, "file:///tmp/limpet-cache", nil)
+if err != nil {
+    panic(err)
+}
 defer bucket.Close()
 
-cl, _ := limpet.NewClient(ctx, bucket)
+cl, err := limpet.NewClient(ctx, bucket)
+if err != nil {
+    panic(err)
+}
 defer cl.Close()
 
-page, _ := cl.Get(ctx, "https://example.com")
+page, err := cl.Get(ctx, "https://example.com")
+if err != nil {
+    panic(err)
+}
 fmt.Println(string(page.Response.Body))
 ```
 
 Per-request cache policy is set through context:
 
 ```go
-ctx := limpet.WithCachePolicy(ctx, limpet.CachePolicyReplace)
-page, _ := cl.Do(ctx, req, limpet.DoConfig{})
+refreshCtx := limpet.WithCachePolicy(ctx, limpet.CachePolicyReplace)
+page, err = cl.Get(refreshCtx, "https://example.com")
 ```
 
 `Do` and `Get` return typed errors for non-200 responses and throttling.
@@ -93,7 +102,7 @@ handshake; it is not a CAPTCHA or JavaScript-challenge solver.
 
 ## Cloudflare, proxies, and limits
 
-- Use `-S` when a site rejects the TLS fingerprint, and `-B` when the page needs
+- Use `-S` when a site rejects the TLS fingerprint. Use `-B` when the page needs
   JavaScript rendering. They are not interchangeable.
 - Cloudflare's own documentation states that automated browsers are not
   supported for solving production challenges. Do not treat `-B` as a Turnstile
@@ -111,13 +120,20 @@ handshake; it is not a CAPTCHA or JavaScript-challenge solver.
 ## Transport
 
 ```go
-bucket, _ := blob.NewBucket(ctx, "file:///tmp/cache", nil)
+bucket, err := blob.NewBucket(ctx, "file:///tmp/cache", nil)
+if err != nil {
+    panic(err)
+}
 defer bucket.Close()
 
 tr := limpet.NewTransport(bucket, limpet.TransportWithRateLimit(10))
 client := &http.Client{Transport: tr}
 
-resp, _ := client.Get("https://example.com")
+resp, err := client.Get("https://example.com")
+if err != nil {
+    panic(err)
+}
+defer resp.Body.Close()
 // resp.Header.Get("X-Limpet-Source") is "fetch", "cache", "revalidated", or "stale".
 ```
 
