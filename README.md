@@ -41,6 +41,8 @@ export LIMPET_RATE_LIMIT=none   # No rate limit
 ```
 
 Format: `<count>[/<duration>]`. Duration uses Go syntax (`1s`, `1m`, `1h`).
+The variable applies to the CLI and `Client`. `Transport` ignores it and has
+no rate limit unless you pass `TransportWithRateLimit`.
 
 ## Go client
 
