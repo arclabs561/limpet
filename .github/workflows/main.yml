@@ -42,7 +42,7 @@ jobs:
     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       with:
         persist-credentials: false
-    - uses: trufflesecurity/trufflehog@e8945406321f2e27a8cec2a22186d4fcffedacdc # v3.48.0
+    - uses: trufflesecurity/trufflehog@31ce31ee1abbcc7dc8eee5764c17121c3044c8b2 # v3.99.7
   golangci-lint:
     runs-on: ubuntu-latest
     steps:
